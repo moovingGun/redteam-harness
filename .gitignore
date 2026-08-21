@@ -1,0 +1,21 @@
+.DS_Store
+
+# 실행 중 자동 생성되는 전체 문제 기록
+engagement/MAP.md
+engagement/LEDGER.md
+engagement/EVENTS.jsonl
+engagement/DECISIONS.jsonl
+engagement/runtime/*
+!engagement/runtime/.gitkeep
+engagement/evidence/*
+!engagement/evidence/.gitkeep
+
+# Stage 폴더에는 시작 파일만 저장소에 포함
+engagement/stage*/*
+!engagement/stage*/STAGE.md
+!engagement/stage*/start-redteam.command
+
+# Python 임시 파일과 로컬 로그
+__pycache__/
+*.py[cod]
+*.log
