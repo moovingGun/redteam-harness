@@ -17,6 +17,7 @@ esac
 
 cd "$STAGE_DIR"
 mkdir -p "$ENGAGEMENT_DIR/runtime"
+export REDTEAM_COMMON="$COMMON_DIR"
 export REDTEAM_RUN_DIR="$ENGAGEMENT_DIR"
 export REDTEAM_STAGE="$STAGE_NAME"
 

@@ -20,6 +20,8 @@ from engine import (
     record_private_evidence,
     render_unlocked,
     safe_action_label,
+    scope_enforced,
+    unapproved_in,
     utc_now,
 )
 
@@ -44,13 +46,50 @@ def agent_key(hook: Dict[str, Any]) -> str:
     return str(hook.get("agent_id") or "main")
 
 
-def stage_key() -> str:
-    return str(os.environ.get("REDTEAM_STAGE") or "미지정")[:80]
+def stage_key(state: Dict[str, Any] | None = None) -> str:
+    """Stage는 이제 승인 흐름이 정하는 상태 라벨이다. 환경변수는 초기값으로만 쓴다."""
+    if isinstance(state, dict):
+        current = state.get("current_stage")
+        if current:
+            return str(current)[:80]
+    return str(os.environ.get("REDTEAM_STAGE") or "stage1")[:80]
 
 
 def requires_classification(hook: Dict[str, Any]) -> bool:
     tool_name = str(hook.get("tool_name") or "")
     return tool_name in {"Bash", "WebFetch", "WebSearch"} or tool_name.startswith("mcp__")
+
+
+def reachable_text(hook: Dict[str, Any]) -> str:
+    """외부로 나가는 도구 입력만 문자열로 모은다."""
+    tool_input = hook.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return ""
+    try:
+        return json.dumps(tool_input, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(tool_input)
+
+
+def deny_for_scope(blocked: list[str]) -> None:
+    mapctl = str(MAPCTL_PATH)
+    ids = ", ".join(blocked)
+    reason = (
+        "승인되지 않은 대상입니다: {0}. 이 IP는 아직 사용자가 범위에 넣지 않았습니다. "
+        "새 경계를 발견했다면 먼저 근거와 함께 승인 요청을 올리세요: "
+        "`/usr/bin/python3 {1} target-propose --value {2} --evidence E-xxxx --reason '무엇을 근거로 다음 대상이라 판단했는지'`. "
+        "사용자가 대시보드에서 승인하면 새 Stage가 열리고 차단이 풀립니다. "
+        "이는 탐색 방향 제한이 아니라 승인 범위 밖 행위를 막는 안전장치입니다."
+    ).format(ids, mapctl, blocked[0])
+    emit(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }
+    )
 
 
 def deny_for_pending(hook: Dict[str, Any], pending_ids: list[str]) -> None:
@@ -86,6 +125,11 @@ def handle_pre(hook: Dict[str, Any]) -> None:
         if awaiting and requires_classification(hook):
             deny_for_pending(hook, sorted(awaiting))
             return
+        if requires_classification(hook) and scope_enforced():
+            blocked = unapproved_in(state, reachable_text(hook))
+            if blocked:
+                deny_for_scope(blocked)
+                return
         branch = ensure_agent_branch(state, agent)
         eid = allocate_event(state)
         parent = state["agents"][agent].get("last_event")
@@ -97,7 +141,7 @@ def handle_pre(hook: Dict[str, Any]) -> None:
             "branch": branch,
             "action": action,
             "agent": agent,
-            "stage": stage_key(),
+            "stage": stage_key(state),
             "parent_event": parent,
             "started_at": started,
             "tool_name": str(hook.get("tool_name") or "Tool"),
@@ -147,7 +191,7 @@ def _finish(hook: Dict[str, Any], failed: bool) -> None:
                 "branch": branch,
                 "action": action,
                 "agent": agent,
-                "stage": stage_key(),
+                "stage": stage_key(state),
                 "parent_event": state["agents"][agent].get("last_event"),
                 "started_at": utc_now(),
                 "tool_name": str(hook.get("tool_name") or "Tool"),

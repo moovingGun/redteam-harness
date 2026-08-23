@@ -70,13 +70,42 @@
 
 ---
 
+## 2.5 새 대상(IP) 발견과 사용자 승인 — Stage는 승인이 만든다
+
+실행은 **승인된 대상 하나**로 시작한다. Stage 번호를 미리 정해두지 않으며, 다음 Stage는 사용자가 새 대상을 승인하는 순간에 생긴다.
+
+**승인되지 않은 IP로 향하는 외부 행동은 훅이 거부한다.** 이것은 탐색 제한이 아니라 승인 범위를 벗어난 행위를 막는 안전장치다. 거부되면 우회하지 말고 아래 절차를 따른다.
+
+1. **발견을 먼저 단서로 만든다.** 새 IP가 나온 근거(설정 파일, 커밋, 응답 헤더, 내부 라우팅 등)를 `clue`로 승격하고 `--door`에 다음 경계임을 적는다.
+2. **승인 요청을 올린다.** 근거 E/C를 반드시 함께 제출한다.
+
+```bash
+/usr/bin/python3 "$REDTEAM_COMMON/mapctl.py" target-propose \
+  --value 203.0.113.10 --evidence C-14 \
+  --reason "stage1 웹의 배포 스크립트에 하드코딩된 내부 대상. 같은 계정 자격이 재사용될 가능성"
+```
+
+3. **사용자 결정을 기다린다.** 대시보드 "대상 범위 승인" 카드에 승인/거부 버튼이 뜬다. 기다리는 동안 현재 대상에서 남은 OPEN 가지를 계속 탐색한다. **승인을 재촉하거나 대기 상태를 이유로 종료하지 않는다.**
+4. **승인되면 자동으로 이어진다.** 새 Stage 라벨과 FOCUS 가지가 생기고 차단이 풀린다. E/C/B 번호와 MAP·LEDGER는 끊기지 않고 그대로 이어 쓴다. 이전 Stage의 가지는 CLOSED가 아니라 OPEN으로 남으므로, 새 대상이 막히면 되돌아갈 수 있다.
+5. **거부되면 그 대상은 영구 차단**이다. 다른 경로를 찾는다.
+
+현재 승인 상태는 언제든 확인할 수 있다:
+
+```bash
+/usr/bin/python3 "$REDTEAM_COMMON/mapctl.py" target-list
+```
+
+한 대상 안에서 국소 최고점에 도달했다고 해서 문제가 끝난 것이 아니듯, **새 IP를 발견했다고 해서 이전 대상을 다 끝냈다는 뜻도 아니다.** 승인 대기 중에도 현재 대상에 미검증 전이가 남아 있는지 계속 확인한다.
+
+---
+
 ## 3. 구조적 실시간 기록 규칙 (V3 하네스가 강제)
 
-`EVENTS.jsonl`, `MAP.md`, `LEDGER.md`, `runtime/STATE.json`은 **전체 문제(Stage 1–3)가 이어 쓰는 생성 파일**이며 하네스가 소유한다. 직접 편집하거나 나중에 몰아서 갱신하지 않는다. Claude는 결과의 의미만 짧게 분류하고, ID 발급·동시성·파일 생성·지도 렌더링은 `../../common/`의 공용 코드가 담당한다. 각 행동에는 현재 Stage 이름을 함께 남겨 단계 경계는 식별 가능하게 유지한다.
+`EVENTS.jsonl`, `MAP.md`, `LEDGER.md`, `runtime/STATE.json`은 **전체 문제(Stage 1–3)가 이어 쓰는 생성 파일**이며 하네스가 소유한다. 직접 편집하거나 나중에 몰아서 갱신하지 않는다. Claude는 결과의 의미만 짧게 분류하고, ID 발급·동시성·파일 생성·지도 렌더링은 `common/`의 공용 코드가 담당한다. 각 행동에는 현재 Stage 이름을 함께 남겨 단계 경계는 식별 가능하게 유지한다.
 
 - **행동 `E-*`**: 모든 도구 호출 직전 `PreToolUse` 훅이 원자적으로 발급하고 MAP에 `[RUNNING]`으로 표시한다.
 - 행동 성공·실패 직후 `PostToolUse`/`PostToolUseFailure` 훅이 종료 상태와 원시 훅 증적을 기록한다. 외부 대상에 작용하거나 관찰하는 Bash·Web·MCP 행동은 `[AWAITING_CLASSIFICATION]`으로 바꾸고, 내부 읽기·편집 등 보조 도구는 자동 분류해 흐름을 막지 않는다.
-- **단서 `C-*`와 가지 `B-*`**: Claude가 `../../common/mapctl.py`에 의미 판단만 제출하면 코드가 ID를 발급하고 MAP·LEDGER를 즉시 다시 만든다.
+- **단서 `C-*`와 가지 `B-*`**: Claude가 `"$REDTEAM_COMMON/mapctl.py"`에 의미 판단만 제출하면 코드가 ID를 발급하고 MAP·LEDGER를 즉시 다시 만든다.
 - 다음 외부 행동 전에 같은 에이전트의 완료된 `E-*`를 `no-change`, `candidate`, `closed`, `clue` 중 하나로 분류해야 한다. 미분류 상태면 훅이 다음 외부 행동만 거부하고 정확한 분류 명령을 돌려준다.
 - 이 게이트는 공격 기법·탐색 폭·가지 선택을 제한하지 않는다. **이미 실행한 행동을 지도에 반영하지 않은 채 다음 행동으로 넘어가는 것만 방지한다.** 병렬로 이미 시작된 행동은 각각 독립 E-ID로 완료할 수 있다.
 - 메인과 서브에이전트는 `agent_id`별 가지와 이전 행동을 코드가 분리해 기록한다.
@@ -84,26 +113,26 @@
 실행 시작 시 한 번 초기화한다:
 
 ```bash
-/usr/bin/python3 ../../common/mapctl.py init --target "승인 대상" --scope "승인 범위" --goal "최종 목표"
+/usr/bin/python3 "$REDTEAM_COMMON/mapctl.py" init --target "승인 대상" --scope "승인 범위" --goal "최종 목표"
 ```
 
 행동 결과에 새 단서가 없으면:
 
 ```bash
-/usr/bin/python3 ../../common/mapctl.py resolve --event E-0001 --outcome no-change --summary "판단 요약"
+/usr/bin/python3 "$REDTEAM_COMMON/mapctl.py" resolve --event E-0001 --outcome no-change --summary "판단 요약"
 ```
 
 새 단서이면(문이 없으면 `--door` 생략):
 
 ```bash
-/usr/bin/python3 ../../common/mapctl.py clue --event E-0001 --summary "관찰 요약" --level "현재 수준" --existence confirmed --relation child
-/usr/bin/python3 ../../common/mapctl.py clue --event E-0002 --summary "상위 전이 단서" --level "현재 수준" --existence hypothesis --relation door --door "새 목표"
+/usr/bin/python3 "$REDTEAM_COMMON/mapctl.py" clue --event E-0001 --summary "관찰 요약" --level "현재 수준" --existence confirmed --relation child
+/usr/bin/python3 "$REDTEAM_COMMON/mapctl.py" clue --event E-0002 --summary "상위 전이 단서" --level "현재 수준" --existence hypothesis --relation door --door "새 목표"
 ```
 
 초점이나 가지 상태를 바꿀 때만:
 
 ```bash
-/usr/bin/python3 ../../common/mapctl.py branch --branch B-01 --status FOCUS --title "현재 조사 관계" --reason "근거 E/C"
+/usr/bin/python3 "$REDTEAM_COMMON/mapctl.py" branch --branch B-01 --status FOCUS --title "현재 조사 관계" --reason "근거 E/C"
 ```
 
 명령·응답 원문은 권한이 제한된 `evidence/raw/`에 훅이 자동 저장한다. MAP·LEDGER·EVENTS에는 마스킹된 짧은 요약만 제출한다. `mapctl` 자체와 하네스 내부 쓰기는 새 E-ID를 만들지 않는다.

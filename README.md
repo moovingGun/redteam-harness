@@ -12,14 +12,16 @@
 > 시스템에 사용하는 것은 위법이다. 실제 대상·허용 범위·안전 조건은 매 실행 시작 시 별도로
 > 명시해야 한다. 저장소 자체에는 특정 대상의 해답이나 익스플로잇을 포함하지 않는다.
 
-**English summary** — A reusable, evidence-driven red-team harness for Claude Code. Every tool
-action is recorded as an event (`E-*`), promoted into clues (`C-*`) and user-addressable branches
-(`B-*`), and rendered on a live per-stage dashboard. The goal is not to teach the agent a fixed
-attack path, but to let a human observe and steer its autonomous exploration by pointing at branch
-IDs rather than dictating techniques. macOS only, stdlib only, authorized lab use only. Full
-documentation below is in Korean.
+**English summary** — A reusable, evidence-driven red-team harness for Claude Code. You start with a
+single approved IP. Every tool action is recorded as an event (`E-*`), promoted into clues (`C-*`)
+and user-addressable branches (`B-*`), and rendered on a live dashboard. When the agent finds a new
+host that leads to the next boundary, it must submit it for approval with evidence — actions against
+unapproved IPs are denied by the hook — and approving it in the dashboard opens the next stage while
+keeping one continuous record. The goal is not to teach the agent a fixed attack path, but to let a
+human observe and steer its autonomous exploration by pointing at branch IDs rather than dictating
+techniques. macOS only, stdlib only, authorized lab use only. Full documentation below is in Korean.
 
-`common/`의 코드와 일반 지침 하나를 공유한다. Stage 1–3은 하나의 큰 문제로 보고 MAP·E/C/B 번호·증적을 계속 이어 쓰며, 각 Stage의 작업 파일만 하위 폴더로 나눈다.
+하나의 IP로 시작한다. Stage는 미리 정하지 않고, 새 대상을 **사용자가 승인하는 순간** 다음 Stage가 열린다. 승인되지 않은 IP로 향하는 행동은 훅이 차단한다. MAP·E/C/B 번호·증적은 Stage가 바뀌어도 하나의 큰 문제로 계속 이어 쓴다.
 
 ## 만든 의도
 
@@ -106,33 +108,48 @@ Linux·Windows에서는 그대로 동작하지 않는다. 옮기려면 각 `star
 
 ## 사용법
 
-1. 풀 문제의 Stage 폴더를 연다.
-2. `start-redteam.command`를 실행한다.
-3. 열린 Claude에 대상, 허용 범위, 최종 목표를 말한다.
+1. 저장소 루트의 `start-redteam.command`를 실행한다.
+2. 열린 Claude에 **시작 IP 하나**와 허용 범위, 최종 목표를 말한다.
+3. 실시간 지도(`http://127.0.0.1:8765`)가 자동으로 열린다.
 
-실시간 지도는 자동으로 브라우저에 열리며 Claude가 종료되면 뷰어도 종료된다. Claude는 반드시 Stage 안의 `start-redteam.command`로 시작해야 공용 Hook과 지침이 적용된다.
+Stage를 미리 고르지 않는다. 하나의 IP로 시작하고, 탐색 중 다음 경계로 이어지는 새 IP가 나오면 승인하는 시점에 다음 Stage가 열린다.
 
-Stage별 홈페이지는 서로 다른 주소로 열린다.
+Claude가 종료되면 뷰어도 함께 종료된다. 포트가 이미 사용 중이면 다음 빈 포트로 자동 이동하며, 실제 주소는 실행 창에 출력된다.
 
-- Stage 1: `http://127.0.0.1:8765`
-- Stage 2: `http://127.0.0.1:8865`
-- Stage 3: `http://127.0.0.1:8965`
-- 그 외 모든 Stage: `http://127.0.0.1:9065` (하나를 공유)
+### 새 대상이 나왔을 때
 
-> [!CAUTION]
-> `new-stage.command`로 만든 Stage 4 이상은 전용 포트가 없어 모두 `9065`로 떨어진다. 커스텀
-> Stage를 둘 이상 동시에 띄우면 포트 바인딩이 충돌해 나중에 실행한 뷰어가 뜨지 않는다.
-> 커스텀 Stage는 한 번에 하나만 실행하거나, 해당 Stage의 `start-redteam.command` 안
-> `VIEWER_PORT`를 직접 다른 값으로 지정한다.
+```
+Claude가 근거와 함께 승인 요청 → 대시보드 "대상 범위 승인" 카드에 버튼 →
+[승인] 누르면 다음 Stage 라벨과 FOCUS 가지가 생기고 차단 해제
+```
 
-각 홈페이지의 행동 목록과 행동 수는 해당 Stage만 표시한다. 전체 MAP·LEDGER·E/C/B 번호는 하나의 큰 문제 흐름으로 공유한다.
+- **승인 전까지 그 IP로 향하는 외부 행동은 훅이 거부한다.** 승인 범위 밖 행위를 막는 안전장치다.
+- 승인해도 이전 Stage의 가지는 CLOSED가 되지 않는다. 새 대상이 막히면 되돌아갈 수 있다.
+- E/C/B 번호와 MAP·LEDGER는 Stage가 바뀌어도 끊기지 않고 이어진다.
+- 거부한 대상은 이후에도 계속 차단된다.
+- 검사 대상은 IPv4 리터럴이며 도메인은 막지 않는다. CVE 조사 같은 웹 검색은 그대로 된다.
+- 오탐으로 막히면 `REDTEAM_SCOPE_ENFORCE=0`으로 실행해 강제를 끌 수 있다.
+
+터미널에서 직접 다룰 수도 있다.
+
+```bash
+python3 common/mapctl.py target-list
+python3 common/mapctl.py target-approve --id T-02
+python3 common/mapctl.py target-reject  --id T-03 --reason "범위 밖"
+```
+
+### Stage별 폴더로 나눠 쓰던 방식 (기존 방식, 계속 동작)
+
+`engagement/stage1`~`stage3`의 `start-redteam.command`와 `new-stage.command`도 그대로 쓸 수 있다. 이 방식은 Stage마다 다른 포트(8765 / 8865 / 8965, 그 외 9065)를 쓰고 해당 Stage의 행동만 표시한다.
 
 ## 폴더 역할
 
+- `start-redteam.command`: 기본 실행기. 문제 하나를 처음부터 끝까지 이 하나로 진행한다.
 - `common/`: 재사용 코드, Hook 설정, 중립 프롬프트, 뷰어. 특정 대상의 답·단서·증적을 넣지 않는다.
-- `engagement/stage1`~`stage3`: 각 단계에서 새로 만드는 작업 파일과 메모.
-- `engagement/runtime/`, `MAP.md`, `LEDGER.md`, `EVENTS.jsonl`, `DECISIONS.jsonl`, `evidence/`: Stage 1–3이 공유하는 전체 문제 기록.
-- `new-stage.command`: 같은 구조의 새 Stage를 추가한다.
+- `engagement/runtime/`, `MAP.md`, `LEDGER.md`, `EVENTS.jsonl`, `DECISIONS.jsonl`, `evidence/`: 모든 Stage가 공유하는 전체 문제 기록.
+- `engagement/stage1`~`stage3`: Stage별 폴더를 쓰던 기존 방식의 작업 파일과 메모.
+- `new-stage.command`: 기존 방식으로 새 Stage 폴더를 추가한다.
+- `tests/`: 승인 흐름과 범위 차단 검증.
 
 Stage가 바뀌어도 전체 문제 기록은 상위 `engagement/`에서 계속 누적된다. 공용 폴더에는 방법론과 작동 코드만 둔다.
 

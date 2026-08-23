@@ -14,7 +14,10 @@ from engine import (
     allocate_clue,
     append_jsonl,
     bootstrap,
+    decide_target,
     locked_state,
+    propose_target,
+    register_initial_target,
     render_unlocked,
     utc_now,
 )
@@ -59,12 +62,61 @@ def append_classification(
 
 def command_init(args: argparse.Namespace) -> None:
     with locked_state() as state:
-        state["target"] = short(args.target)
+        target = short(args.target)
+        state["target"] = target
         state["scope"] = short(args.scope, 400)
         state["goal"] = short(args.goal, 400)
         state["current_goal"] = state["goal"]
+        tid = register_initial_target(state, target, args.stage)
         render_unlocked(state)
-    print("하네스 초기화 완료")
+    print("하네스 초기화 완료 ({0} = {1}, {2})".format(tid, target, args.stage))
+
+
+def command_target_propose(args: argparse.Namespace) -> None:
+    tid, status, created = propose_target(args.value, args.evidence, args.reason)
+    if not created:
+        print(
+            json.dumps(
+                {"id": tid, "value": args.value, "status": status, "created": False},
+                ensure_ascii=False,
+            )
+        )
+        return
+    print(
+        json.dumps(
+            {
+                "id": tid,
+                "value": args.value,
+                "status": status,
+                "created": True,
+                "note": "승인 대기. 대시보드에서 승인하거나 사용자가 승인하기 전까지 이 대상으로의 외부 행동은 차단된다.",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def command_target_approve(args: argparse.Namespace) -> None:
+    try:
+        result = decide_target(args.id, "approved", args.reason or "", args.stage)
+    except KeyError:
+        raise SystemExit("등록되지 않은 대상입니다: " + args.id)
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def command_target_reject(args: argparse.Namespace) -> None:
+    try:
+        result = decide_target(args.id, "rejected", args.reason or "")
+    except KeyError:
+        raise SystemExit("등록되지 않은 대상입니다: " + args.id)
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def command_target_list(_args: argparse.Namespace) -> None:
+    with locked_state() as state:
+        targets = {tid: dict(item) for tid, item in state.get("targets", {}).items()}
+        current = state.get("current_stage")
+    print(json.dumps({"current_stage": current, "targets": targets}, ensure_ascii=False, indent=2))
 
 
 def command_resolve(args: argparse.Namespace) -> None:
@@ -162,9 +214,20 @@ def command_status(_args: argparse.Namespace) -> None:
         render_unlocked(state)
         result = {
             "target": state.get("target"),
+            "current_stage": state.get("current_stage"),
             "current_goal": state.get("current_goal"),
             "focus": state.get("current_focus"),
             "pending": sorted(state.get("pending", {}).keys()),
+            "pending_targets": [
+                {"id": tid, "value": item.get("value"), "reason": item.get("reason")}
+                for tid, item in sorted(state.get("targets", {}).items())
+                if item.get("status") == "pending"
+            ],
+            "approved_targets": [
+                {"id": tid, "value": item.get("value"), "stage": item.get("stage")}
+                for tid, item in sorted(state.get("targets", {}).items())
+                if item.get("status") == "approved"
+            ],
             "clues": len(state.get("clues", [])),
             "branches": len(state.get("branches", {})),
         }
@@ -179,7 +242,28 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--target", required=True)
     init.add_argument("--scope", required=True)
     init.add_argument("--goal", required=True)
+    init.add_argument("--stage", default="stage1")
     init.set_defaults(func=command_init)
+
+    propose = sub.add_parser("target-propose", help="새로 발견한 대상을 승인 대기로 올린다")
+    propose.add_argument("--value", required=True, help="발견한 IP 또는 호스트")
+    propose.add_argument("--evidence", help="근거 이벤트/단서 ID (예: E-0087 또는 C-14)")
+    propose.add_argument("--reason", default="", help="이 대상이 다음 경계라고 판단한 근거")
+    propose.set_defaults(func=command_target_propose)
+
+    approve = sub.add_parser("target-approve", help="사용자 승인. 새 Stage와 FOCUS 가지가 생긴다")
+    approve.add_argument("--id", required=True)
+    approve.add_argument("--stage", help="생략하면 다음 stage 번호가 자동 배정된다")
+    approve.add_argument("--reason", default="")
+    approve.set_defaults(func=command_target_approve)
+
+    reject = sub.add_parser("target-reject", help="대상 거부. 이후에도 계속 차단된다")
+    reject.add_argument("--id", required=True)
+    reject.add_argument("--reason", default="")
+    reject.set_defaults(func=command_target_reject)
+
+    target_list = sub.add_parser("target-list")
+    target_list.set_defaults(func=command_target_list)
 
     resolve = sub.add_parser("resolve")
     resolve.add_argument("--event", required=True)

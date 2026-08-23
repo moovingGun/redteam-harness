@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import socket
 import threading
 import webbrowser
@@ -93,6 +94,11 @@ PAGE = r"""<!doctype html>
     <div class="stat"><div class="stat-label">현재 FOCUS</div><div id="focusCount" class="stat-value green">0</div></div>
     <div class="stat"><div class="stat-label">열린 가지</div><div id="openCount" class="stat-value cyan">0</div></div>
     <div class="stat"><div class="stat-label">미승격 후보</div><div id="candidateCount" class="stat-value amber">0</div></div>
+  </section>
+
+  <section id="targetCard" class="card sync-card">
+    <div class="card-head"><div class="card-title">대상 범위 승인</div><div id="targetMeta" class="card-meta">확인 중</div></div>
+    <div class="panel-body"><div id="targetPending" class="list"></div><div style="height:10px"></div><div id="targetApproved" class="list"></div></div>
   </section>
 
   <section id="syncCard" class="card sync-card">
@@ -194,6 +200,53 @@ PAGE = r"""<!doctype html>
     missingAll.forEach(clue=>{const event=promoted.get(clue)||{};const row=document.createElement('div');row.className='row';const top=document.createElement('div');top.className='row-top';const id=document.createElement('span');id.className='row-id';id.textContent=clue;top.append(id,badge('AUTO'));const body=document.createElement('div');body.className='row-text';const where=[missingMap.includes(clue)?'MAP 누락':'',missingLedger.includes(clue)?'LEDGER 누락':''].filter(Boolean).join(' · ');body.textContent=`${where}\n근거 ${event.event_id||'E'} · ${event.observation_summary||event.action_type||'승격 이벤트'}`;row.append(top,body);box.appendChild(row)});
   }
 
+  let busyTarget=null;
+  async function decideTarget(id,action){
+    if(busyTarget)return; busyTarget=id;
+    try{
+      const response=await fetch('/api/target',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,action})});
+      if(!response.ok){const detail=await response.text();alert('처리 실패: '+detail)}
+      lastVersion=''; await poll();
+    }catch(error){alert('처리 실패: '+error.message)}
+    finally{busyTarget=null}
+  }
+
+  function renderTargets(data){
+    const targets=data.targets||{}, entries=Object.entries(targets).sort((a,b)=>a[0].localeCompare(b[0]));
+    const waiting=entries.filter(([,t])=>t.status==='pending'), settled=entries.filter(([,t])=>t.status!=='pending');
+    const approved=settled.filter(([,t])=>t.status==='approved');
+    const card=el('targetCard');card.classList.toggle('warn',waiting.length>0);card.classList.toggle('ok',waiting.length===0&&approved.length>0);
+    el('targetMeta').textContent=`승인 ${approved.length} · 대기 ${waiting.length} · 현재 ${data.current_stage||'stage1'}`;
+    const box=el('targetPending');box.replaceChildren();
+    if(!waiting.length)empty(box,'승인 대기 중인 대상이 없습니다. 새 IP가 발견되면 여기에 승인 버튼이 나타납니다.');
+    else waiting.forEach(([id,t])=>{
+      const row=document.createElement('div');row.className='row';
+      const top=document.createElement('div');top.className='row-top';
+      const rid=document.createElement('span');rid.className='row-id';rid.textContent=id;
+      top.append(rid,badge('PENDING'));
+      const body=document.createElement('div');body.className='row-text';
+      body.textContent=`${t.value}\n근거: ${t.evidence||'없음'} · ${t.reason||''}`;
+      const actions=document.createElement('div');actions.className='toolbar';actions.style.marginTop='9px';
+      const ok=document.createElement('button');ok.type='button';ok.textContent='승인';ok.className='active';
+      ok.addEventListener('click',()=>{if(confirm(`${t.value} 을(를) 범위에 추가하고 새 Stage를 시작할까요?`))decideTarget(id,'approve')});
+      const no=document.createElement('button');no.type='button';no.textContent='거부';
+      no.addEventListener('click',()=>{if(confirm(`${t.value} 을(를) 거부할까요? 이후에도 계속 차단됩니다.`))decideTarget(id,'reject')});
+      actions.append(ok,no);
+      row.append(top,body,actions);box.appendChild(row);
+    });
+    const done=el('targetApproved');done.replaceChildren();
+    if(!settled.length)empty(done,'아직 확정된 대상이 없습니다.');
+    else settled.forEach(([id,t])=>{
+      const row=document.createElement('div');row.className='row';
+      const top=document.createElement('div');top.className='row-top';
+      const rid=document.createElement('span');rid.className='row-id';rid.textContent=id;
+      top.append(rid,badge(t.status==='approved'?'OK':'CLOSED'));
+      const body=document.createElement('div');body.className='row-text';
+      body.textContent=`${t.value} · ${t.stage||'미배정'}\n${t.reason||''}`;
+      row.append(top,body);done.appendChild(row);
+    });
+  }
+
   function renderActivity(events){
     const box=el('activity'); box.replaceChildren();
     if(!events.length){empty(box,'EVENTS.jsonl이 생성되면 모든 행동이 시간순으로 표시됩니다.');return;}
@@ -215,11 +268,11 @@ PAGE = r"""<!doctype html>
       const response=await fetch('/api/state',{cache:'no-store'}); if(!response.ok)throw new Error('HTTP '+response.status);
       const data=await response.json(); el('dot').className='dot live'; el('status').textContent=data.map_exists?'실시간 연결됨':'MAP.md 생성 대기 중';
       el('mapPath').textContent=data.map_path; el('eventPath').textContent=data.events_path;
-      const version=`${data.map_mtime_ns}:${data.map_size}:${data.events_mtime_ns}:${data.events_size}:${data.ledger_mtime_ns}:${data.ledger_size}`;
+      const version=`${data.map_mtime_ns}:${data.map_size}:${data.events_mtime_ns}:${data.events_size}:${data.ledger_mtime_ns}:${data.ledger_size}:${data.state_mtime_ns}:${data.state_size}`;
       if(version!==lastVersion){
         const nearBottom=viewport.scrollHeight-viewport.scrollTop-viewport.clientHeight<80, text=data.map_content||'';
         mapEl.textContent=text||'MAP.md가 생성되거나 내용이 추가되기를 기다리고 있습니다.'; mapEl.className=text?'':'empty';
-        el('updated').textContent=data.updated||'—'; updateStats(text,data); renderSync(text,data); renderBranches(text,data.events||[]); renderCandidates(text,data.events||[]); renderActivity(data.events||[]); lastVersion=version;
+        el('updated').textContent=data.updated||'—'; updateStats(text,data); renderTargets(data); renderSync(text,data); renderBranches(text,data.events||[]); renderCandidates(text,data.events||[]); renderActivity(data.events||[]); lastVersion=version;
         if(following||nearBottom)viewport.scrollTop=viewport.scrollHeight;
       }
     }catch(error){el('dot').className='dot error';el('status').textContent='연결 재시도 중'}
@@ -246,6 +299,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     map_path: Path
     events_path: Path
     ledger_path: Path
+    state_path: Path
     page_bytes: bytes
     stage_filter: str | None
 
@@ -275,16 +329,95 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._headers(404, "text/plain; charset=utf-8", len(body))
         self.wfile.write(body)
 
+    def do_POST(self) -> None:
+        route = urlparse(self.path).path
+        if route != "/api/target":
+            self._reply(404, {"error": "not found"})
+            return
+        # 로컬 대시보드에서만 승인할 수 있게 한다.
+        if self.client_address[0] not in {"127.0.0.1", "::1"}:
+            self._reply(403, {"error": "local only"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._reply(400, {"error": "bad length"})
+            return
+        if length <= 0 or length > 4096:
+            self._reply(400, {"error": "bad length"})
+            return
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._reply(400, {"error": "bad json"})
+            return
+        if not isinstance(payload, dict):
+            self._reply(400, {"error": "bad payload"})
+            return
+        tid = str(payload.get("id") or "")
+        action = str(payload.get("action") or "")
+        if action not in {"approve", "reject"}:
+            self._reply(400, {"error": "action must be approve or reject"})
+            return
+        decision = "approved" if action == "approve" else "rejected"
+        try:
+            import engine
+
+            result = engine.decide_target(tid, decision, reason="대시보드에서 사용자가 결정")
+        except KeyError:
+            self._reply(404, {"error": "unknown target: " + tid})
+            return
+        except Exception as error:  # noqa: BLE001 - 대시보드에 원인을 그대로 보여준다
+            self._reply(500, {"error": str(error)})
+            return
+        self._reply(200, {"ok": True, "result": result})
+
+    def _reply(self, status: int, value: dict[str, object]) -> None:
+        body = json.dumps(value, ensure_ascii=False).encode("utf-8")
+        self._headers(status, "application/json; charset=utf-8", len(body))
+        self.wfile.write(body)
+
     def _state(self) -> dict[str, object]:
         map_data = self._read_map()
         event_data = self._read_events()
         ledger_data = self._read_ledger()
-        latest = max(float(map_data["mtime"]), float(event_data["mtime"]), float(ledger_data["mtime"]))
+        state_data = self._read_state()
+        latest = max(
+            float(map_data["mtime"]),
+            float(event_data["mtime"]),
+            float(ledger_data["mtime"]),
+            float(state_data["mtime"]),
+        )
         return {
             **map_data,
             **event_data,
             **ledger_data,
+            **state_data,
             "updated": datetime.fromtimestamp(latest).strftime("%H:%M:%S") if latest else None,
+        }
+
+    def _read_state(self) -> dict[str, object]:
+        empty: dict[str, object] = {
+            "targets": {},
+            "current_stage": None,
+            "state_mtime_ns": 0,
+            "state_size": 0,
+            "mtime": 0.0,
+        }
+        try:
+            stat = self.state_path.stat()
+            value = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return empty
+        if not isinstance(value, dict):
+            return empty
+        targets = value.get("targets")
+        return {
+            "targets": targets if isinstance(targets, dict) else {},
+            "current_stage": value.get("current_stage"),
+            "state_mtime_ns": stat.st_mtime_ns,
+            "state_size": stat.st_size,
+            "mtime": stat.st_mtime,
         }
 
     def _read_map(self) -> dict[str, object]:
@@ -350,6 +483,9 @@ def main() -> None:
     map_path = Path(args.map_file).expanduser().resolve()
     events_path = Path(args.events).expanduser().resolve() if args.events else map_path.parent / "EVENTS.jsonl"
     ledger_path = map_path.parent / "LEDGER.md"
+    state_path = map_path.parent / "runtime" / "STATE.json"
+    # 승인 버튼이 engine과 같은 engagement 루트를 쓰도록 맞춘다.
+    os.environ.setdefault("REDTEAM_RUN_DIR", str(map_path.parent))
     port = available_port(args.port)
     page_bytes = PAGE.replace("__DASHBOARD_LABEL__", html.escape(args.label)).encode("utf-8")
     handler = type(
@@ -359,6 +495,7 @@ def main() -> None:
             "map_path": map_path,
             "events_path": events_path,
             "ledger_path": ledger_path,
+            "state_path": state_path,
             "page_bytes": page_bytes,
             "stage_filter": args.stage,
         },
