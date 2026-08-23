@@ -1,5 +1,23 @@
 # 재사용형 Red Team Harness
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
+![Python](https://img.shields.io/badge/python-3.9%2B-blue)
+![Dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-green)
+
+> [!WARNING]
+> **승인된 격리 모의침투 환경에서만 사용한다.**
+> 이 저장소는 공격 행위를 수행하는 AI 에이전트를 구동하는 하네스다. 서면 승인 없이 타인의
+> 시스템에 사용하는 것은 위법이다. 실제 대상·허용 범위·안전 조건은 매 실행 시작 시 별도로
+> 명시해야 한다. 저장소 자체에는 특정 대상의 해답이나 익스플로잇을 포함하지 않는다.
+
+**English summary** — A reusable, evidence-driven red-team harness for Claude Code. Every tool
+action is recorded as an event (`E-*`), promoted into clues (`C-*`) and user-addressable branches
+(`B-*`), and rendered on a live per-stage dashboard. The goal is not to teach the agent a fixed
+attack path, but to let a human observe and steer its autonomous exploration by pointing at branch
+IDs rather than dictating techniques. macOS only, stdlib only, authorized lab use only. Full
+documentation below is in Korean.
+
 `common/`의 코드와 일반 지침 하나를 공유한다. Stage 1–3은 하나의 큰 문제로 보고 MAP·E/C/B 번호·증적을 계속 이어 쓰며, 각 Stage의 작업 파일만 하위 폴더로 나눈다.
 
 ## 만든 의도
@@ -70,7 +88,20 @@ Claude가 나중에 MAP을 몰아서 작성하지 못하도록 외부 행동 단
 
 공용 코드와 프롬프트에는 대상별 해답이나 이전 실행 증적을 넣지 않는다. 실행 기록은 Git에서 제외되며, 판단 근거는 현재 실행의 E-ID에 연결한다. 이를 통해 같은 환경을 다시 시험할 때 방법론은 유지하되 특정 대상의 정답을 미리 알고 푸는 효과를 줄인다.
 
-> 승인된 격리 모의침투 환경에서만 사용하며, 실제 범위와 안전 조건은 실행 시작 시 별도로 명시해야 한다.
+## 실행 요구사항
+
+**macOS 전용이다.** 다음 세 가지가 필요하다.
+
+| 요구사항 | 비고 |
+|---|---|
+| macOS | 실행기가 zsh `.command` 스크립트이며 zsh 전용 파라미터 확장(`${0:A:h}`)을 쓴다. |
+| `/usr/bin/python3` | 시스템 파이썬 경로를 하드코딩한다. Homebrew·pyenv 파이썬은 사용하지 않는다. Python 3.9 이상. |
+| `claude` CLI | Claude Code가 설치되어 PATH에 있어야 한다. |
+
+런타임 의존성은 표준 라이브러리뿐이므로 `pip install`은 필요 없다.
+
+Linux·Windows에서는 그대로 동작하지 않는다. 옮기려면 각 `start-redteam.command`의 zsh 확장과
+`/usr/bin/python3` 경로를 해당 환경에 맞게 바꿔야 한다.
 
 ## 사용법
 
@@ -85,6 +116,13 @@ Stage별 홈페이지는 서로 다른 주소로 열린다.
 - Stage 1: `http://127.0.0.1:8765`
 - Stage 2: `http://127.0.0.1:8865`
 - Stage 3: `http://127.0.0.1:8965`
+- 그 외 모든 Stage: `http://127.0.0.1:9065` (하나를 공유)
+
+> [!CAUTION]
+> `new-stage.command`로 만든 Stage 4 이상은 전용 포트가 없어 모두 `9065`로 떨어진다. 커스텀
+> Stage를 둘 이상 동시에 띄우면 포트 바인딩이 충돌해 나중에 실행한 뷰어가 뜨지 않는다.
+> 커스텀 Stage는 한 번에 하나만 실행하거나, 해당 Stage의 `start-redteam.command` 안
+> `VIEWER_PORT`를 직접 다른 값으로 지정한다.
 
 각 홈페이지의 행동 목록과 행동 수는 해당 Stage만 표시한다. 전체 MAP·LEDGER·E/C/B 번호는 하나의 큰 문제 흐름으로 공유한다.
 
@@ -96,3 +134,7 @@ Stage별 홈페이지는 서로 다른 주소로 열린다.
 - `new-stage.command`: 같은 구조의 새 Stage를 추가한다.
 
 Stage가 바뀌어도 전체 문제 기록은 상위 `engagement/`에서 계속 누적된다. 공용 폴더에는 방법론과 작동 코드만 둔다.
+
+## 라이선스
+
+MIT. [LICENSE](LICENSE) 참고.
