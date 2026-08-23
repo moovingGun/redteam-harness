@@ -1,5 +1,6 @@
 # 재사용형 Red Team Harness
 
+[![CI](https://github.com/moovingGun/redteam-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/moovingGun/redteam-harness/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue)

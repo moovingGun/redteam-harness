@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: 파이썬 문법 검사
+        run: python -m compileall -q common
+
+      - name: zsh 설치
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
+      - name: 실행기 문법 검사
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            if zsh -n "$f"; then
+              echo "OK   $f"
+            else
+              echo "FAIL $f"
+              fail=1
+            fi
+          done < <(find . -name '*.command' -not -path './.git/*')
+          exit $fail
+        shell: bash
+
+      - name: 실행 기록이 커밋되지 않았는지 검사
+        run: |
+          leaked=$(git ls-files \
+            'engagement/MAP.md' \
+            'engagement/LEDGER.md' \
+            'engagement/EVENTS.jsonl' \
+            'engagement/DECISIONS.jsonl' \
+            'engagement/evidence/*' \
+            'engagement/runtime/*' \
+            | grep -v '\.gitkeep$' || true)
+          if [ -n "$leaked" ]; then
+            echo "클린룸 위반: 실행 기록이 저장소에 포함되어 있다."
+            echo "$leaked"
+            exit 1
+          fi
+          echo "OK   실행 기록 없음"
+        shell: bash
