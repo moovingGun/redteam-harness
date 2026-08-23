@@ -69,13 +69,32 @@ PAGE = r"""<!doctype html>
     .sync-card.warn .sync-summary { border-color:rgba(255,123,134,.4); background:rgba(255,123,134,.07); }
     .sync-card.ok .sync-summary { border-color:rgba(95,227,154,.32); background:rgba(95,227,154,.05); }
     .empty { color:var(--muted); font-size:12px; padding:10px 2px; }
-    .toolbar { display:flex; align-items:center; gap:8px; }
+    .toolbar { display:flex; align-items:center; gap:8px; flex:0 0 auto; }
     button { border:1px solid var(--line); border-radius:8px; padding:7px 10px; background:var(--panel2); color:var(--text); cursor:pointer; font-weight:750; }
     button.active { border-color:var(--cyan); color:var(--cyan); }
+    button:disabled { opacity:.4; cursor:default; }
     #mapViewport { overflow:auto; height:600px; }
     pre { margin:0; padding:20px; min-width:max-content; white-space:pre; color:#d9e5f5; font:14px/1.7 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; tab-size:2; }
-    @media(max-width:1100px){.stats{grid-template-columns:repeat(4,minmax(0,1fr))}.grid{grid-template-columns:1fr}}
-    @media(max-width:650px){.shell{padding:16px}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}header{align-items:flex-start;flex-direction:column}.card-head{align-items:flex-start;flex-direction:column}#mapViewport{height:520px}pre{font-size:12px}}
+
+    /* 고정 배치: 각 칸은 자기 자리에 머무르고 칸 안에서만 스크롤한다. */
+    .board { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(340px,.65fr); gap:14px; align-items:start; }
+    .col { display:grid; gap:14px; min-width:0; }
+    .pair { display:grid; grid-template-columns:1fr 1fr; gap:14px; min-width:0; }
+    .list.tall { max-height:560px; }
+    .list.short { max-height:230px; }
+    .hint { color:var(--muted); font-size:11px; font-weight:600; margin-left:7px; }
+    .count { color:var(--cyan); font-size:11px; font-weight:800; }
+
+    /* 새로 올라온 항목만 눈에 띄게. 스크롤은 건드리지 않는다. */
+    .row.fresh { border-color:rgba(86,217,232,.65); background:rgba(86,217,232,.08); }
+    .badge.new { color:var(--cyan); border-color:rgba(86,217,232,.6); background:rgba(86,217,232,.12); }
+    details.raw { margin-top:14px; border:1px solid var(--line); border-radius:15px; background:linear-gradient(180deg,rgba(17,27,42,.96),rgba(10,16,26,.96)); }
+    details.raw > summary { cursor:pointer; padding:13px 16px; font-weight:800; list-style:none; display:flex; justify-content:space-between; gap:12px; align-items:center; }
+    details.raw > summary::-webkit-details-marker { display:none; }
+    details.raw[open] > summary { border-bottom:1px solid var(--line); }
+
+    @media(max-width:1100px){.stats{grid-template-columns:repeat(4,minmax(0,1fr))}.board{grid-template-columns:1fr}.pair{grid-template-columns:1fr}}
+    @media(max-width:650px){.shell{padding:16px}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}header{align-items:flex-start;flex-direction:column}.card-head{align-items:flex-start;flex-direction:column}#mapViewport{height:520px}pre{font-size:12px}.list.tall{max-height:380px}}
   </style>
 </head>
 <body>
@@ -96,38 +115,58 @@ PAGE = r"""<!doctype html>
     <div class="stat"><div class="stat-label">미승격 후보</div><div id="candidateCount" class="stat-value amber">0</div></div>
   </section>
 
-  <section id="targetCard" class="card sync-card">
-    <div class="card-head"><div class="card-title">대상 범위 승인</div><div id="targetMeta" class="card-meta">확인 중</div></div>
-    <div class="panel-body"><div id="targetPending" class="list"></div><div style="height:10px"></div><div id="targetApproved" class="list"></div></div>
-  </section>
-
-  <section id="syncCard" class="card sync-card">
-    <div class="card-head"><div class="card-title">기록 동기화 감시</div><div id="syncState" class="card-meta">확인 중</div></div>
-    <div class="panel-body"><div id="syncSummary" class="sync-summary">EVENTS · MAP · LEDGER를 비교하고 있습니다.</div><div style="height:10px"></div><div id="recovered" class="list"></div></div>
-  </section>
-
-  <section class="grid">
-    <div class="stack">
-      <section class="card">
-        <div class="card-head"><div class="card-title">현재 초점과 탐색 가지</div><div id="branchMeta" class="card-meta">B-* 대기 중</div></div>
-        <div class="panel-body"><div id="focus" class="focus">FOCUS 가지가 생성되면 여기에 표시됩니다.</div><div style="height:10px"></div><div id="branches" class="list"></div></div>
+  <section class="board">
+    <div class="col">
+      <section class="card" id="cluesCard">
+        <div class="card-head">
+          <div class="card-title">상승 경로 <span class="hint">최신이 맨 위</span></div>
+          <div id="clueMeta" class="card-meta">C-* 대기 중</div>
+          <div class="toolbar"><button id="clueJump" type="button" disabled>새 항목 0</button></div>
+        </div>
+        <div class="panel-body"><div id="clueList" class="list tall"></div></div>
       </section>
-      <section class="card">
-        <div class="card-head"><div class="card-title">전체 MAP.md</div><div id="mapPath" class="card-meta">MAP.md 대기 중</div><div class="toolbar"><button id="smaller" type="button">A−</button><button id="larger" type="button">A+</button><button id="follow" type="button" class="active">최신 위치</button></div></div>
-        <div id="mapViewport"><pre id="map" class="empty">MAP.md가 생성되거나 변경되면 자동 표시됩니다.</pre></div>
-      </section>
+
+      <div class="pair">
+        <section class="card">
+          <div class="card-head"><div class="card-title">미승격 관찰</div><div class="card-meta">candidate / closed</div></div>
+          <div class="panel-body"><div id="candidates" class="list short"></div></div>
+        </section>
+        <section id="syncCard" class="card">
+          <div class="card-head"><div class="card-title">기록 동기화 감시</div><div id="syncState" class="card-meta">확인 중</div></div>
+          <div class="panel-body"><div id="syncSummary" class="sync-summary">EVENTS · MAP · LEDGER를 비교하고 있습니다.</div><div style="height:10px"></div><div id="recovered" class="list short"></div></div>
+        </section>
+      </div>
     </div>
 
-    <aside class="stack">
-      <section class="card"><div class="card-head"><div class="card-title">미승격 관찰</div><div class="card-meta">candidate / closed</div></div><div class="panel-body"><div id="candidates" class="list"></div></div></section>
-      <section class="card"><div class="card-head"><div class="card-title">실시간 행동</div><div id="eventPath" class="card-meta">EVENTS.jsonl 대기 중</div></div><div class="panel-body"><div id="activity" class="list"></div></div></section>
-    </aside>
+    <div class="col">
+      <section id="targetCard" class="card">
+        <div class="card-head"><div class="card-title">대상 범위 승인</div><div id="targetMeta" class="card-meta">확인 중</div></div>
+        <div class="panel-body"><div id="targetPending" class="list short"></div><div style="height:10px"></div><div id="targetApproved" class="list short"></div></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div class="card-title">실시간 행동</div><div id="eventPath" class="card-meta">EVENTS.jsonl 대기 중</div></div>
+        <div class="panel-body"><div id="activity" class="list short"></div></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><div class="card-title">현재 초점과 탐색 가지</div><div id="branchMeta" class="card-meta">B-* 대기 중</div></div>
+        <div class="panel-body"><div id="focus" class="focus">FOCUS 가지가 생성되면 여기에 표시됩니다.</div><div style="height:10px"></div><div id="branches" class="list short"></div></div>
+      </section>
+    </div>
   </section>
+
+  <details class="raw">
+    <summary><span>전체 MAP.md 원문</span><span id="mapPath" class="card-meta">MAP.md 대기 중</span></summary>
+    <div class="card-head" style="border-bottom:none"><div class="card-meta">원문은 자동으로 스크롤하지 않는다</div><div class="toolbar"><button id="smaller" type="button">A−</button><button id="larger" type="button">A+</button><button id="top" type="button">맨 위</button></div></div>
+    <div id="mapViewport"><pre id="map" class="empty">MAP.md가 생성되거나 변경되면 자동 표시됩니다.</pre></div>
+  </details>
 </main>
 
 <script>
   const el=id=>document.getElementById(id), mapEl=el('map'), viewport=el('mapViewport');
-  let lastVersion='', following=true, fontSize=14;
+  let lastVersion='', fontSize=14;
+  const pendingFresh={clue:0};
   const lines=text=>text.split(/\r?\n/);
   const statusOf=line=>((line.match(/\[(FOCUS|OPEN|PARKED|CLOSED)\]/i)||[])[1]||'').toUpperCase();
   const candidateState=line=>((line.match(/\[(unreviewed|candidate|promoted|closed)\]/i)||[])[1]||'').toLowerCase();
@@ -152,6 +191,60 @@ PAGE = r"""<!doctype html>
 
   function empty(container,message){ container.replaceChildren(); const d=document.createElement('div'); d.className='empty'; d.textContent=message; container.appendChild(d); }
   function badge(value){ const s=document.createElement('span'); s.className='badge '+String(value).toLowerCase(); s.textContent=value; return s; }
+
+  // 새로고침해도 보던 자리를 지킨다. 위치 이동은 사용자가 버튼을 눌렀을 때만 일어난다.
+  function keepScroll(box,paint){ const top=box.scrollTop, left=box.scrollLeft; paint(); box.scrollTop=top; box.scrollLeft=left; }
+
+  // 칸별로 이미 본 항목을 기억해 새로 올라온 것만 표시한다.
+  const seen={clue:new Set(),branch:new Set(),cand:new Set(),act:new Set(),target:new Set()};
+  const primed={};
+  function markFresh(kind,id,row){
+    if(!id)return false;
+    const store=seen[kind];
+    if(store.has(id))return false;
+    store.add(id);
+    if(!primed[kind])return false;      // 첫 렌더에서는 전부 새 항목으로 보이지 않게 한다
+    row.classList.add('fresh');
+    row.prepend(badge('NEW'));
+    return true;
+  }
+  function prime(kind){ primed[kind]=true; }
+
+  function makeRow(id,state,text){
+    const row=document.createElement('div');row.className='row';
+    const top=document.createElement('div');top.className='row-top';
+    const rid=document.createElement('span');rid.className='row-id';rid.textContent=id;
+    top.append(rid,badge(state));
+    const body=document.createElement('div');body.className='row-text';body.textContent=text;
+    row.append(top,body);
+    return {row,top};
+  }
+
+  function renderClues(text){
+    const box=el('clueList');
+    // MAP의 상승 경로는 최신이 맨 위다. 순서를 그대로 유지한다.
+    const rows=lines(text).filter(line=>/^C-\d+\s*\|/i.test(line));
+    keepScroll(box,()=>{
+      box.replaceChildren();
+      if(!rows.length){empty(box,'단서가 승격되면 최신 항목이 이 칸 맨 위에 쌓입니다.');return;}
+      let fresh=0;
+      rows.forEach(line=>{
+        const id=(line.match(/^C-\d+/i)||['C'])[0].toUpperCase();
+        const existence=/\|\s*#\s*\|/.test(line)?'확인':/\|\s*\?\s*\|/.test(line)?'가정':'관찰';
+        const {row,top}=makeRow(id,existence,line);
+        if(markFresh('clue',id,top))fresh++;
+        if(/<현재 위치>/.test(line))row.classList.add('fresh');
+        box.appendChild(row);
+      });
+      const button=el('clueJump');
+      pendingFresh.clue+=fresh;
+      button.textContent='새 항목 '+pendingFresh.clue;
+      button.disabled=pendingFresh.clue===0;
+      button.classList.toggle('active',pendingFresh.clue>0);
+      el('clueMeta').textContent=`C-* ${rows.length}개 · 확인 ${rows.filter(l=>/\|\s*#\s*\|/.test(l)).length} · 가정 ${rows.filter(l=>/\|\s*\?\s*\|/.test(l)).length}`;
+    });
+    prime('clue');
+  }
   function renderBranches(text,events){
     const all=lines(text).filter(line=>/^B-\d+\s*\|/i.test(line));
     const focus=all.find(line=>statusOf(line)==='FOCUS');
@@ -168,9 +261,13 @@ PAGE = r"""<!doctype html>
     el('focusCount').textContent=counts.FOCUS; el('openCount').textContent=counts.OPEN;
     const lag=stale?` · MAP ${latestFinished-latestMap}단계 지연`:'';
     el('branchMeta').textContent=`FOCUS ${counts.FOCUS} · OPEN ${counts.OPEN} · PARKED ${counts.PARKED} · CLOSED ${counts.CLOSED}${lag}`;
-    const box=el('branches'); box.replaceChildren();
-    if(!others.length){empty(box,'다른 OPEN/PARKED/CLOSED 가지가 아직 없습니다.');return;}
-    others.forEach(line=>{const row=document.createElement('div');row.className='row';const top=document.createElement('div');top.className='row-top';const id=document.createElement('span');id.className='row-id';id.textContent=(line.match(/^B-\d+/i)||['B'])[0];top.append(id,badge(statusOf(line)||'BRANCH'));const body=document.createElement('div');body.className='row-text';body.textContent=line;row.append(top,body);box.appendChild(row)});
+    const box=el('branches');
+    keepScroll(box,()=>{
+      box.replaceChildren();
+      if(!others.length){empty(box,'다른 OPEN/PARKED/CLOSED 가지가 아직 없습니다.');return;}
+      others.forEach(line=>{const id=(line.match(/^B-\d+/i)||['B'])[0].toUpperCase();const {row,top}=makeRow(id,statusOf(line)||'BRANCH',line);markFresh('branch',id,top);box.appendChild(row)});
+    });
+    prime('branch');
   }
 
   function renderCandidates(text,events){
@@ -179,9 +276,13 @@ PAGE = r"""<!doctype html>
     events.filter(event=>event.phase!=='start'&&['unreviewed','candidate','closed'].includes(String(event.promotion_state||'').toLowerCase())).forEach(event=>{if(!byId.has(event.event_id))byId.set(event.event_id,`${event.event_id} | [${event.promotion_state}] | ${event.observation_summary||event.action_type||'관찰'} | EVENTS 자동 표시`)});
     const items=Array.from(byId.values()).sort((a,b)=>eventNumber((a.match(/^E-\d+/i)||[''])[0])-eventNumber((b.match(/^E-\d+/i)||[''])[0]));
     el('candidateCount').textContent=items.filter(line=>candidateState(line)==='candidate'||candidateState(line)==='unreviewed').length;
-    const box=el('candidates'); box.replaceChildren();
-    if(!items.length){empty(box,'미승격 관찰이 생기면 여기에 표시됩니다.');return;}
-    items.slice(-20).reverse().forEach(line=>{const row=document.createElement('div');row.className='row';const top=document.createElement('div');top.className='row-top';const id=document.createElement('span');id.className='row-id';id.textContent=(line.match(/^E-\d+/i)||['E'])[0];top.append(id,badge(candidateState(line)||'candidate'));const body=document.createElement('div');body.className='row-text';body.textContent=line;row.append(top,body);box.appendChild(row)});
+    const box=el('candidates');
+    keepScroll(box,()=>{
+      box.replaceChildren();
+      if(!items.length){empty(box,'미승격 관찰이 생기면 여기에 표시됩니다.');return;}
+      items.slice(-20).reverse().forEach(line=>{const id=(line.match(/^E-\d+/i)||['E'])[0].toUpperCase();const {row,top}=makeRow(id,candidateState(line)||'candidate',line);markFresh('cand',id,top);box.appendChild(row)});
+    });
+    prime('cand');
   }
 
   function renderSync(text,data){
@@ -194,10 +295,14 @@ PAGE = r"""<!doctype html>
     el('syncState').textContent=issues?`지연 감지 · MAP 누락 ${missingMap.length} · LEDGER 누락 ${missingLedger.length}`:'동기화됨';
     const live=snapshot.live, liveText=live?`${live.event_id} ${live.phase==='start'?'실행 중':(live.status||live.phase||'완료')} · ${live.stage_id||'미지정'} · ${live.action_type||''}`:'행동 대기 중';
     el('syncSummary').textContent=`최신 활동: ${liveText}\nMAP 기준 최신 E: ${latestMap<0?'없음':'E-'+String(latestMap).padStart(4,'0')} · 완료 이벤트 지연: ${lag}\n원본 MAP을 수정하지 않고 누락 항목을 아래에 자동 복구 표시합니다.`;
-    const box=el('recovered');box.replaceChildren();
+    const box=el('recovered');
     const missingAll=Array.from(new Set([...missingMap,...missingLedger])).sort();
+    const paint=()=>{
+    box.replaceChildren();
     if(!missingAll.length){empty(box,'EVENTS 기준 누락된 승격 단서가 없습니다.');return;}
     missingAll.forEach(clue=>{const event=promoted.get(clue)||{};const row=document.createElement('div');row.className='row';const top=document.createElement('div');top.className='row-top';const id=document.createElement('span');id.className='row-id';id.textContent=clue;top.append(id,badge('AUTO'));const body=document.createElement('div');body.className='row-text';const where=[missingMap.includes(clue)?'MAP 누락':'',missingLedger.includes(clue)?'LEDGER 누락':''].filter(Boolean).join(' · ');body.textContent=`${where}\n근거 ${event.event_id||'E'} · ${event.observation_summary||event.action_type||'승격 이벤트'}`;row.append(top,body);box.appendChild(row)});
+    };
+    keepScroll(box,paint);
   }
 
   let busyTarget=null;
@@ -217,7 +322,9 @@ PAGE = r"""<!doctype html>
     const approved=settled.filter(([,t])=>t.status==='approved');
     const card=el('targetCard');card.classList.toggle('warn',waiting.length>0);card.classList.toggle('ok',waiting.length===0&&approved.length>0);
     el('targetMeta').textContent=`승인 ${approved.length} · 대기 ${waiting.length} · 현재 ${data.current_stage||'stage1'}`;
-    const box=el('targetPending');box.replaceChildren();
+    const box=el('targetPending');
+    const paintPending=()=>{
+    box.replaceChildren();
     if(!waiting.length)empty(box,'승인 대기 중인 대상이 없습니다. 새 IP가 발견되면 여기에 승인 버튼이 나타납니다.');
     else waiting.forEach(([id,t])=>{
       const row=document.createElement('div');row.className='row';
@@ -234,6 +341,8 @@ PAGE = r"""<!doctype html>
       actions.append(ok,no);
       row.append(top,body,actions);box.appendChild(row);
     });
+    };
+    keepScroll(box,paintPending);
     const done=el('targetApproved');done.replaceChildren();
     if(!settled.length)empty(done,'아직 확정된 대상이 없습니다.');
     else settled.forEach(([id,t])=>{
@@ -248,9 +357,20 @@ PAGE = r"""<!doctype html>
   }
 
   function renderActivity(events){
-    const box=el('activity'); box.replaceChildren();
-    if(!events.length){empty(box,'EVENTS.jsonl이 생성되면 모든 행동이 시간순으로 표시됩니다.');return;}
-    events.slice(-30).reverse().forEach(event=>{const row=document.createElement('div');row.className='row';const top=document.createElement('div');top.className='row-top';const id=document.createElement('span');id.className='row-id';id.textContent=event.event_id||'E';const state=event.phase==='start'?'running':(event.status||event.phase||'event');top.append(id,badge(state));const body=document.createElement('div');body.className='row-text';const parts=[event.ts_utc,event.stage_id,event.action_type,event.observation_summary,event.promotion_state,event.duration_ms==null?'':`${event.duration_ms}ms`].filter(Boolean);body.textContent=parts.join(' · ');row.append(top,body);box.appendChild(row)});
+    const box=el('activity');
+    keepScroll(box,()=>{
+      box.replaceChildren();
+      if(!events.length){empty(box,'EVENTS.jsonl이 생성되면 모든 행동이 시간순으로 표시됩니다.');return;}
+      events.slice(-30).reverse().forEach(event=>{
+        const id=event.event_id||'E';
+        const state=event.phase==='start'?'running':(event.status||event.phase||'event');
+        const parts=[event.ts_utc,event.stage_id,event.action_type,event.observation_summary,event.promotion_state,event.duration_ms==null?'':`${event.duration_ms}ms`].filter(Boolean);
+        const {row,top}=makeRow(id,state,parts.join(' · '));
+        markFresh('act',id+':'+state,top);
+        box.appendChild(row);
+      });
+    });
+    prime('act');
   }
 
   function updateStats(text,data){
@@ -270,14 +390,23 @@ PAGE = r"""<!doctype html>
       el('mapPath').textContent=data.map_path; el('eventPath').textContent=data.events_path;
       const version=`${data.map_mtime_ns}:${data.map_size}:${data.events_mtime_ns}:${data.events_size}:${data.ledger_mtime_ns}:${data.ledger_size}:${data.state_mtime_ns}:${data.state_size}`;
       if(version!==lastVersion){
-        const nearBottom=viewport.scrollHeight-viewport.scrollTop-viewport.clientHeight<80, text=data.map_content||'';
-        mapEl.textContent=text||'MAP.md가 생성되거나 내용이 추가되기를 기다리고 있습니다.'; mapEl.className=text?'':'empty';
-        el('updated').textContent=data.updated||'—'; updateStats(text,data); renderTargets(data); renderSync(text,data); renderBranches(text,data.events||[]); renderCandidates(text,data.events||[]); renderActivity(data.events||[]); lastVersion=version;
-        if(following||nearBottom)viewport.scrollTop=viewport.scrollHeight;
+        const text=data.map_content||'';
+        // 원문 칸도 보던 자리를 유지한다. 자동으로 맨 아래로 내려가지 않는다.
+        keepScroll(viewport,()=>{mapEl.textContent=text||'MAP.md가 생성되거나 내용이 추가되기를 기다리고 있습니다.'; mapEl.className=text?'':'empty'});
+        el('updated').textContent=data.updated||'—';
+        updateStats(text,data); renderClues(text); renderTargets(data); renderSync(text,data);
+        renderBranches(text,data.events||[]); renderCandidates(text,data.events||[]); renderActivity(data.events||[]);
+        lastVersion=version;
       }
     }catch(error){el('dot').className='dot error';el('status').textContent='연결 재시도 중'}
   }
-  el('follow').addEventListener('click',()=>{following=!following;el('follow').classList.toggle('active',following);if(following)viewport.scrollTop=viewport.scrollHeight});
+  el('clueJump').addEventListener('click',()=>{
+    const box=el('clueList'), target=box.querySelector('.row.fresh');
+    if(target)box.scrollTop=Math.max(0,target.offsetTop-box.offsetTop-8);
+    box.querySelectorAll('.row.fresh').forEach(row=>{row.classList.remove('fresh');const b=row.querySelector('.badge.new');if(b)b.remove()});
+    pendingFresh.clue=0; const button=el('clueJump'); button.textContent='새 항목 0'; button.disabled=true; button.classList.remove('active');
+  });
+  el('top').addEventListener('click',()=>{viewport.scrollTop=0});
   el('smaller').addEventListener('click',()=>{fontSize=Math.max(10,fontSize-1);mapEl.style.fontSize=fontSize+'px'});
   el('larger').addEventListener('click',()=>{fontSize=Math.min(24,fontSize+1);mapEl.style.fontSize=fontSize+'px'});
   poll(); setInterval(poll,750);
