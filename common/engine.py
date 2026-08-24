@@ -285,7 +285,10 @@ def extract_ipv4(text: str) -> Set[str]:
     for candidate in _IPV4_RE.findall(text or ""):
         octets = candidate.split(".")
         if all(part.isdigit() and 0 <= int(part) <= 255 for part in octets):
-            found.add(candidate)
+            # leading-zero 옥텟(예: 192.168.001.5)을 정규화한다. 이렇게 하지 않으면
+            # ipaddress.IPv4Address가 "Leading zeros are not permitted"로 예외를 던지고,
+            # 그 예외가 훅을 죽여 도구가 범위 검사 없이 통과하는 fail-open이 된다.
+            found.add(".".join(str(int(part)) for part in octets))
     return found
 
 
@@ -570,6 +573,10 @@ def is_internal_harness_call(hook: Dict[str, Any]) -> bool:
     command = _expand_common(str(tool_input.get("command") or ""))
     if not command.strip() or _SUBSTITUTION_RE.search(command):
         return False
+    if "\n" in command or "\r" in command:
+        return False  # 여러 줄이면 단일 자기 호출이 아니다. 줄바꿈은 shlex가
+        # 공백처럼 삼켜 제어 토큰을 남기지 않으므로 여기서 직접 막지 않으면
+        # 첫 줄이 mapctl 호출인 블록 전체가 범위 검사를 건너뛴다(fail-open).
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
