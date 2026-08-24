@@ -9,21 +9,28 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
-from engine import (
-    EVENTS_PATH,
-    allocate_event,
-    append_jsonl,
-    bootstrap,
-    ensure_agent_branch,
-    is_internal_harness_call,
-    locked_state,
-    record_private_evidence,
-    render_unlocked,
-    safe_action_label,
-    scope_enforced,
-    unapproved_in,
-    utc_now,
-)
+try:
+    from engine import (
+        EVENTS_PATH,
+        allocate_event,
+        append_jsonl,
+        bootstrap,
+        ensure_agent_branch,
+        is_internal_harness_call,
+        locked_state,
+        record_private_evidence,
+        render_unlocked,
+        safe_action_label,
+        scope_enforced,
+        unapproved_in,
+        utc_now,
+    )
+except BaseException as error:  # noqa: BLE001 - engine은 루트를 못 찾으면 SystemExit을 던진다
+    # 여기서 죽으면 PreToolUse가 판단 없이 사라져 도구가 그대로 실행된다.
+    # 원인을 기억해 두었다가 pre 모드에서 차단 사유로 돌려준다.
+    IMPORT_ERROR: str | None = "{0}: {1}".format(type(error).__name__, error)
+else:
+    IMPORT_ERROR = None
 
 
 MAPCTL_PATH = Path(__file__).resolve().with_name("mapctl.py")
@@ -37,7 +44,12 @@ def read_input() -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+_EMITTED = False
+
+
 def emit(value: Dict[str, Any]) -> None:
+    global _EMITTED
+    _EMITTED = True
     sys.stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
     sys.stdout.write("\n")
 
@@ -245,13 +257,52 @@ def _finish(hook: Dict[str, Any], failed: bool) -> None:
     )
 
 
+def deny_for_hook_failure(detail: str) -> None:
+    """훅이 판단을 마치지 못했으면 통과가 아니라 차단으로 끝낸다."""
+    emit(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "하네스 훅이 범위·동기화 판단을 마치지 못했습니다 ({0}). "
+                    "판단하지 못한 행동은 승인 범위 안이라고 간주하지 않으므로 차단합니다. "
+                    "start-redteam.command로 실행 중인지, common/ 코드가 정상인지 확인하세요. "
+                    "원인을 알고도 계속해야 한다면 REDTEAM_SCOPE_ENFORCE=0으로 강제를 끌 수 있습니다."
+                ).format(detail),
+            }
+        }
+    )
+
+
+def run_pre_fail_closed(hook: Dict[str, Any]) -> None:
+    """pre 훅의 실패는 fail-open이 된다. 이 하네스에서 가장 위험한 실패 양식이다.
+
+    훅이 예외로 죽으면 Claude Code는 그 도구 호출을 그대로 실행한다. 즉 범위
+    차단이 조용히 사라진다. 실제로 leading-zero IP 하나가 파서를 크래시시켜
+    승인 안 된 대상이 통과한 적이 있다. 그래서 어떤 이유로 죽든 차단으로 닫는다.
+    """
+    if IMPORT_ERROR is not None:
+        deny_for_hook_failure(IMPORT_ERROR)
+        return
+    try:
+        handle_pre(hook)
+    except BaseException as error:  # noqa: BLE001 - 어떤 실패든 통과시키지 않는다
+        if not _EMITTED:
+            deny_for_hook_failure("{0}: {1}".format(type(error).__name__, error))
+
+
 def main() -> None:
     mode = sys.argv[1] if len(sys.argv) > 1 else "session"
     hook = read_input()
+    if mode == "pre":
+        run_pre_fail_closed(hook)
+        return
+    if IMPORT_ERROR is not None:
+        # pre가 아닌 모드는 기록용이다. 차단할 대상이 없으므로 원인만 드러낸다.
+        raise SystemExit("engine 로드 실패: " + IMPORT_ERROR)
     if mode in ("session", "bootstrap"):
         bootstrap()
-    elif mode == "pre":
-        handle_pre(hook)
     elif mode == "post":
         _finish(hook, failed=False)
     elif mode == "failure":

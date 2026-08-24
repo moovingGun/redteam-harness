@@ -448,6 +448,96 @@ class DashboardCsrf(unittest.TestCase):
         self.assertNotIn("__CSRF_TOKEN__", text)
 
 
+class HookWiring(unittest.TestCase):
+    """settings.json의 훅 배선이 실제 파일을 가리키는지 확인한다.
+
+    다른 테스트는 hook.handle_pre를 직접 호출하므로 이 배선을 전혀 검증하지 못한다.
+    실제로 launcher가 한 단계 얕아졌을 때 경로만 ../../common으로 남아 모든 훅이
+    로드 실패했고, 테스트 36개는 전부 통과한 채로 그 회귀를 놓쳤다.
+    경로가 틀리면 E-ID 발급·범위 차단·지도 동기화가 통째로 죽는다.
+    """
+
+    def _hook_specs(self) -> list[tuple[str, list[str]]]:
+        settings = json.loads((COMMON / "settings.json").read_text(encoding="utf-8"))
+        specs = []
+        for event, entries in settings["hooks"].items():
+            for entry in entries:
+                for spec in entry["hooks"]:
+                    args = spec.get("args", [])
+                    if any("hook.py" in str(arg) for arg in args):
+                        specs.append((event, [str(arg) for arg in args]))
+        return specs
+
+    def test_settings_hook_paths_resolve_to_real_file(self) -> None:
+        # launcher가 cd 하는 위치가 곧 CLAUDE_PROJECT_DIR이다.
+        project_dir = ROOT / "engagement"
+        specs = self._hook_specs()
+        self.assertTrue(specs, "settings.json에서 hook.py 배선을 찾지 못했다")
+        for event, args in specs:
+            resolved = Path(args[0].replace("${CLAUDE_PROJECT_DIR}", str(project_dir))).resolve()
+            self.assertTrue(
+                resolved.exists(),
+                "{0} 훅 경로가 실제 파일이 아니다: {1} -> {2}".format(event, args[0], resolved),
+            )
+            self.assertEqual(resolved, (COMMON / "hook.py").resolve())
+
+    def test_settings_hook_modes_are_understood(self) -> None:
+        # 모드 문자열이 틀리면 hook.main이 SystemExit으로 죽는다.
+        for event, args in self._hook_specs():
+            self.assertGreater(len(args), 1, "{0}: 모드 인자가 없다".format(event))
+            self.assertIn(args[1], {"session", "bootstrap", "pre", "post", "failure"})
+
+    def test_launcher_runs_claude_from_engagement_dir(self) -> None:
+        # 위 경로 검증은 launcher가 engagement/에서 claude를 띄운다는 전제 위에 있다.
+        # 그 전제가 바뀌면 상대 경로가 다시 어긋나므로 여기서 고정한다.
+        text = (ROOT / "start-redteam.command").read_text(encoding="utf-8")
+        self.assertIn('ENGAGEMENT_DIR="$ROOT_DIR/engagement"', text)
+        self.assertIn('cd "$ENGAGEMENT_DIR"', text)
+
+
+class HookFailsClosed(unittest.TestCase):
+    """pre 훅이 판단을 마치지 못하면 통과가 아니라 차단이어야 한다.
+
+    훅이 예외로 죽으면 Claude Code는 그 도구를 그대로 실행한다. 범위 차단이
+    존재 이유인 하네스에서 이건 가장 위험한 실패 양식이다.
+    """
+
+    def test_unexpected_failure_denies_instead_of_passing(self) -> None:
+        original = hook.handle_pre
+        hook.handle_pre = lambda _hook: (_ for _ in ()).throw(RuntimeError("파서가 죽었다"))
+        hook._EMITTED = False
+        try:
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                hook.run_pre_fail_closed({"tool_name": "Bash", "tool_input": {"command": "nmap x"}})
+            result = json.loads(buffer.getvalue().strip())
+        finally:
+            hook.handle_pre = original
+            hook._EMITTED = False
+        self.assertEqual(decision_of(result), "deny")
+        self.assertIn("RuntimeError", result["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_existing_decision_is_not_double_emitted(self) -> None:
+        # 이미 deny를 낸 뒤 죽는 경우 JSON을 두 번 쓰면 출력이 깨진다.
+        def emit_then_die(_hook: dict) -> None:
+            hook.emit({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "먼저 낸 결정"}})
+            raise RuntimeError("그 뒤에 죽음")
+
+        original = hook.handle_pre
+        hook.handle_pre = emit_then_die
+        hook._EMITTED = False
+        try:
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                hook.run_pre_fail_closed({"tool_name": "Bash", "tool_input": {}})
+            lines = [line for line in buffer.getvalue().splitlines() if line.strip()]
+        finally:
+            hook.handle_pre = original
+            hook._EMITTED = False
+        self.assertEqual(len(lines), 1, "결정 JSON은 한 번만 출력되어야 한다")
+        self.assertEqual(json.loads(lines[0])["hookSpecificOutput"]["permissionDecisionReason"], "먼저 낸 결정")
+
+
 class StageLabelling(unittest.TestCase):
     def test_next_stage_skips_used_labels(self) -> None:
         state = engine.default_state()
