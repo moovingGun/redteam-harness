@@ -48,6 +48,7 @@ jobs:
             'engagement/DECISIONS.jsonl' \
             'engagement/evidence/*' \
             'engagement/runtime/*' \
+            'engagement/work/*' \
             | grep -v '\.gitkeep$' || true)
           if [ -n "$leaked" ]; then
             echo "클린룸 위반: 실행 기록이 저장소에 포함되어 있다."

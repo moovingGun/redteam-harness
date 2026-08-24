@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -55,6 +56,7 @@ def clear_pending() -> None:
 
 class TargetApprovalFlow(unittest.TestCase):
     def setUp(self) -> None:
+        shutil.rmtree(engine.WORK_DIR, ignore_errors=True)
         with engine.locked_state() as state:
             state.update(engine.default_state())
         with engine.locked_state() as state:
@@ -112,6 +114,29 @@ class TargetApprovalFlow(unittest.TestCase):
 
         clear_pending()
         self.assertIsNone(decision_of(pre("Bash", {"command": "nmap 203.0.113.55"})))
+
+    def test_stage_workspace_is_created(self) -> None:
+        stage1 = engine.WORK_DIR / "stage1"
+        self.assertTrue(stage1.is_dir(), "최초 대상 등록 시 work/stage1이 생겨야 한다")
+        self.assertTrue((stage1 / "STAGE.md").exists())
+
+        tid, _, _ = engine.propose_target("203.0.113.55", "C-14", "설정 파일에서 발견")
+        self.assertFalse((engine.WORK_DIR / "stage2").exists(), "승인 전에는 만들지 않는다")
+
+        engine.decide_target(tid, "approved", "테스트 승인")
+        stage2 = engine.WORK_DIR / "stage2"
+        self.assertTrue(stage2.is_dir())
+        self.assertIn("203.0.113.55", (stage2 / "STAGE.md").read_text(encoding="utf-8"))
+
+    def test_workspace_note_is_not_overwritten(self) -> None:
+        note = engine.WORK_DIR / "stage1" / "STAGE.md"
+        note.write_text("사용자가 적어둔 메모", encoding="utf-8")
+        engine.ensure_stage_workspace("stage1", "192.0.2.10")
+        self.assertEqual(note.read_text(encoding="utf-8"), "사용자가 적어둔 메모")
+
+    def test_map_points_to_current_workspace(self) -> None:
+        text = engine.MAP_PATH.read_text(encoding="utf-8")
+        self.assertIn("작업 폴더: work/stage1/", text)
 
     def test_reject_keeps_blocking(self) -> None:
         tid, _, _ = engine.propose_target("203.0.113.99", "C-20", "가능성만 있음")

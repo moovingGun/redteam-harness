@@ -44,6 +44,7 @@ DECISIONS_PATH = ROOT / "DECISIONS.jsonl"
 MAP_PATH = ROOT / "MAP.md"
 LEDGER_PATH = ROOT / "LEDGER.md"
 RAW_DIR = ROOT / "evidence" / "raw"
+WORK_DIR = ROOT / "work"
 
 
 def utc_now() -> str:
@@ -210,6 +211,34 @@ def pending_targets(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     return result
 
 
+def ensure_stage_workspace(stage: str, target: str = "") -> Path:
+    """Stage별 작업 파일 자리를 만든다. 기록 파일과 섞이지 않게 work/ 아래에 둔다."""
+    path = WORK_DIR / stage
+    path.mkdir(parents=True, exist_ok=True)
+    readme = path / "STAGE.md"
+    if not readme.exists():
+        _atomic_text(
+            readme,
+            "\n".join(
+                [
+                    "# {0} 작업 폴더".format(stage),
+                    "",
+                    "- 대상: {0}".format(target or "미설정"),
+                    "- 생성: {0}".format(utc_now()),
+                    "",
+                    "이 Stage에서 새로 만든 스캔 결과·페이로드·임시 스크립트·메모를 여기에 둔다.",
+                    "",
+                    "`MAP.md`, `LEDGER.md`, `EVENTS.jsonl`, `DECISIONS.jsonl`, `runtime/`, `evidence/`는",
+                    "상위 engagement 폴더에서 모든 Stage가 이어 쓴다. 그 파일들은 하네스가 생성하므로",
+                    "직접 편집하지 않는다.",
+                    "",
+                ]
+            ),
+            mode=0o600,
+        )
+    return path
+
+
 def next_stage_label(state: Dict[str, Any]) -> str:
     used = {item.get("stage") for item in state.get("targets", {}).values() if item.get("stage")}
     number = 1
@@ -273,6 +302,7 @@ def register_initial_target(state: Dict[str, Any], value: str, stage: str = "sta
     }
     state["current_stage"] = stage
     state["target"] = value
+    ensure_stage_workspace(stage, value)
     return tid
 
 
@@ -333,6 +363,7 @@ def decide_target(
             state["current_stage"] = item["stage"]
             state["target"] = item["value"]
             state["current_goal"] = "{0} 표면 탐색".format(item["value"])
+            ensure_stage_workspace(item["stage"], item["value"])
             bid = allocate_branch(state)
             state["branches"][bid] = {
                 "status": "FOCUS",
@@ -466,6 +497,9 @@ def render_unlocked(state: Dict[str, Any]) -> None:
         "최종 목표: {0}".format(state.get("goal", "미설정")),
         "현재 목표: {0}".format(state.get("current_goal", "미설정")),
         "승인 대상: {0}건 · 승인 대기: {1}건".format(approved_count, len(waiting)),
+        "작업 폴더: work/{0}/ (이 Stage에서 새로 만드는 파일은 여기에 둔다)".format(
+            state.get("current_stage", "stage1")
+        ),
         "",
         "## 대상 범위 (T-*)",
         "",

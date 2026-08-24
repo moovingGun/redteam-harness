@@ -138,18 +138,27 @@ python3 common/mapctl.py target-approve --id T-02
 python3 common/mapctl.py target-reject  --id T-03 --reason "범위 밖"
 ```
 
-### Stage별 폴더로 나눠 쓰던 방식 (기존 방식, 계속 동작)
+### Stage가 바뀌면 생기는 것
 
-`engagement/stage1`~`stage3`의 `start-redteam.command`와 `new-stage.command`도 그대로 쓸 수 있다. 이 방식은 Stage마다 다른 포트(8765 / 8865 / 8965, 그 외 9065)를 쓰고 해당 Stage의 행동만 표시한다.
+승인 한 번으로 아래가 한꺼번에 처리된다.
+
+| | |
+|---|---|
+| Stage 라벨 | 다음 번호가 자동 배정된다 (`stage2`, `stage3`…) |
+| FOCUS 가지 | 새 대상용 `B-*`가 생기고 이전 FOCUS는 OPEN으로 내려간다 |
+| 작업 폴더 | `engagement/work/stageN/`이 만들어진다 |
+| 차단 해제 | 그 IP로의 행동이 허용된다 |
+| 기록 | E/C/B 번호와 MAP·LEDGER는 끊기지 않고 이어진다 |
 
 ## 폴더 역할
 
-- `start-redteam.command`: 기본 실행기. 문제 하나를 처음부터 끝까지 이 하나로 진행한다.
+- `start-redteam.command`: 유일한 실행기. 문제 하나를 처음부터 끝까지 이것으로 진행한다.
 - `common/`: 재사용 코드, Hook 설정, 중립 프롬프트, 뷰어. 특정 대상의 답·단서·증적을 넣지 않는다.
-- `engagement/runtime/`, `MAP.md`, `LEDGER.md`, `EVENTS.jsonl`, `DECISIONS.jsonl`, `evidence/`: 모든 Stage가 공유하는 전체 문제 기록.
-- `engagement/stage1`~`stage3`: Stage별 폴더를 쓰던 기존 방식의 작업 파일과 메모.
-- `new-stage.command`: 기존 방식으로 새 Stage 폴더를 추가한다.
+- `engagement/runtime/`, `MAP.md`, `LEDGER.md`, `EVENTS.jsonl`, `DECISIONS.jsonl`, `evidence/`: 모든 Stage가 이어 쓰는 전체 문제 기록. 하네스가 소유하며 직접 편집하지 않는다.
+- `engagement/work/stageN/`: Stage 승인 시 자동 생성되는 작업 폴더. 스캔 결과·페이로드·임시 스크립트처럼 그 단계에서 새로 만드는 파일을 둔다. Git에서 제외된다.
 - `tests/`: 승인 흐름과 범위 차단 검증.
+
+기록 파일과 작업 파일이 섞이지 않도록 자리를 나눴다. 하네스가 만드는 것은 `engagement/` 바로 아래, 사람과 AI가 만드는 것은 `engagement/work/stageN/` 아래다.
 
 Stage가 바뀌어도 전체 문제 기록은 상위 `engagement/`에서 계속 누적된다. 공용 폴더에는 방법론과 작동 코드만 둔다.
 

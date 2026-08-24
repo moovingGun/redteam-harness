@@ -10,10 +10,8 @@ engagement/runtime/*
 engagement/evidence/*
 !engagement/evidence/.gitkeep
 
-# Stage 폴더에는 시작 파일만 저장소에 포함
-engagement/stage*/*
-!engagement/stage*/STAGE.md
-!engagement/stage*/start-redteam.command
+# Stage 작업 파일은 실행 산출물이므로 저장소에 넣지 않는다
+engagement/work/
 
 # Python 임시 파일과 로컬 로그
 __pycache__/
