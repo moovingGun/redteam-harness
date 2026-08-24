@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import fcntl
+import ipaddress
 import json
 import os
 import re
+import shlex
 import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -248,20 +250,86 @@ def next_stage_label(state: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------- 범위 검사
+#
+# 이 검사의 위협 모델: 정직한 AI가 실수로 승인 범위를 벗어나는 것을 막는 가드레일이다.
+# 우회하려고 작정한 실행자를 막는 샌드박스가 아니다. 셸 변수·파일 경유·호스트명처럼
+# 문자열만 봐서는 알 수 없는 경로는 여전히 통과하므로, 범위 통제의 최종 책임은
+# 프롬프트 §0의 안전 규칙과 사용자 승인에 있다.
 
 _IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+
+# URL로 적힌 호스트. 10진수·16진수 IP 표기는 오탐을 줄이려고 여기서만 해석한다.
+# 호스트 문자만 받는다. 훅 입력은 JSON 문자열이라 따옴표까지 삼키면 파싱이 깨진다.
+_URL_HOST_RE = re.compile(
+    r"[a-z][a-z0-9+.\-]*://(?:[^/?#\s@\"']*@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._\-]+)",
+    re.IGNORECASE,
+)
+
+# 대괄호 없이 적힌 IPv6 리터럴 후보. 콜론이 두 개 이상이어야 후보로 본다.
+_IPV6_RE = re.compile(
+    r"(?<![0-9A-Za-z:.])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?:%[0-9A-Za-z_.\-]+)?"
+)
+
+# 10진수 한 덩어리를 IPv4로 해석할 최소값. 1.0.0.0 미만은 정수형 IP 표기로 보지 않는다.
+_MIN_PACKED_IPV4 = 0x01000000
 
 # 하네스 자신과 루프백은 언제나 허용한다. 대상이 아니라 도구이기 때문이다.
 ALWAYS_ALLOWED = frozenset({"127.0.0.1", "0.0.0.0", "255.255.255.255"})
 
+IPAddress = Any  # ipaddress.IPv4Address | IPv6Address
+
 
 def extract_ipv4(text: str) -> Set[str]:
-    """문자열에서 유효한 IPv4 리터럴만 추출한다. 버전 문자열은 걸리지 않는다."""
+    """문자열에서 유효한 점 4개 IPv4 리터럴만 추출한다. 버전 문자열은 걸리지 않는다."""
     found: Set[str] = set()
     for candidate in _IPV4_RE.findall(text or ""):
         octets = candidate.split(".")
         if all(part.isdigit() and 0 <= int(part) <= 255 for part in octets):
             found.add(candidate)
+    return found
+
+
+def _as_ip(text: str) -> Optional[IPAddress]:
+    """호스트 문자열 하나를 IP로 해석한다. 10진수·16진수 표기도 받는다."""
+    value = str(text).strip().strip("[]")
+    if not value:
+        return None
+    value = value.split("%", 1)[0]
+    try:
+        return ipaddress.ip_address(value)
+    except ValueError:
+        pass
+    lowered = value.lower()
+    try:
+        if lowered.startswith("0x"):
+            number = int(lowered, 16)
+        elif value.isdigit():
+            number = int(value)
+            if number < _MIN_PACKED_IPV4:
+                return None  # 포트 번호·카운터를 IP로 오인하지 않는다
+        else:
+            return None
+    except ValueError:
+        return None
+    if 0 <= number <= 0xFFFFFFFF:
+        return ipaddress.IPv4Address(number)
+    return None
+
+
+def extract_targets(text: str) -> Set[IPAddress]:
+    """명령·URL에서 대상 IP를 뽑는다. 점 4개 표기, IPv6 리터럴, URL 안의 정수형 표기."""
+    text = text or ""
+    found: Set[IPAddress] = set()
+    for literal in extract_ipv4(text):
+        found.add(ipaddress.IPv4Address(literal))
+    for candidate in _IPV6_RE.findall(text):
+        parsed = _as_ip(candidate)
+        if parsed is not None and parsed.version == 6:
+            found.add(parsed)
+    for host in _URL_HOST_RE.findall(text):
+        parsed = _as_ip(host)
+        if parsed is not None:
+            found.add(parsed)
     return found
 
 
@@ -274,13 +342,28 @@ def scope_enforced() -> bool:
     }
 
 
+def _approved_networks(state: Dict[str, Any]) -> List[Any]:
+    """승인 값을 네트워크로 해석한다. 단일 IP는 /32(/128), 대역은 CIDR 그대로."""
+    networks: List[Any] = []
+    for value in approved_values(state):
+        try:
+            networks.append(ipaddress.ip_network(value, strict=False))
+        except ValueError:
+            continue  # 호스트명 등 IP가 아닌 승인 값은 IP 판정에 쓰지 않는다
+    return networks
+
+
+def _always_allowed(ip: IPAddress) -> bool:
+    return str(ip) in ALWAYS_ALLOWED or ip.is_loopback or ip.is_unspecified
+
+
 def unapproved_in(state: Dict[str, Any], text: str) -> List[str]:
     """승인되지 않은 대상 IP 목록. 도메인은 조사·연구를 막지 않도록 검사하지 않는다."""
-    approved = approved_values(state)
+    networks = _approved_networks(state)
     blocked = [
-        ip
-        for ip in extract_ipv4(text)
-        if ip not in ALWAYS_ALLOWED and ip not in approved and not ip.startswith("127.")
+        str(ip)
+        for ip in extract_targets(text)
+        if not _always_allowed(ip) and not any(ip in network for network in networks)
     ]
     return sorted(set(blocked))
 
@@ -434,13 +517,69 @@ def safe_action_label(hook: Dict[str, Any]) -> str:
     return "{0} 실행".format(tool_name)
 
 
+# ---------------------------------------------------- 하네스 자기 호출 판정
+#
+# 이 판정이 참이면 범위 검사와 분류 게이트를 건너뛰고 E-ID도 발급하지 않는다.
+# 따라서 느슨하면 그대로 우회 통로가 된다. 예전처럼 명령 문자열 어딘가에
+# "mapctl.py"가 있는지만 보면 주석·파일명·echo로 아무 명령이나 숨길 수 있었다.
+# 이제는 실제로 실행되는 프로그램이 하네스 스크립트인 단일 명령일 때만 참이다.
+
+_HARNESS_SCRIPTS = frozenset({"mapctl.py", "hook.py", "start-redteam.command"})
+_PYTHON_NAMES = ("python", "python3", "python3.9", "python3.10", "python3.11", "python3.12")
+
+# 명령 치환·백틱은 다른 명령을 숨길 수 있으므로 자기 호출로 인정하지 않는다.
+_SUBSTITUTION_RE = re.compile(r"\$\(|`|<\(|>\(")
+# shlex가 구두점으로 떼어내는 셸 제어 연산자.
+_CONTROL_TOKENS = frozenset({";", "&", "&&", "|", "||", "(", ")", "<", ">", ">>", "<<"})
+
+
+def _expand_common(command: str) -> str:
+    """프롬프트가 쓰는 $REDTEAM_COMMON만 펼친다. 나머지 변수는 펼치지 않는다."""
+    common = os.environ.get("REDTEAM_COMMON") or str(Path(__file__).resolve().parent)
+    for form in ("${REDTEAM_COMMON}", "$REDTEAM_COMMON"):
+        command = command.replace(form, common)
+    return command
+
+
+def _harness_script_arg(tokens: List[str]) -> Optional[str]:
+    """실행 대상 위치에 하네스 스크립트가 있으면 그 경로를 돌려준다."""
+    if not tokens:
+        return None
+    if Path(tokens[0]).name in _HARNESS_SCRIPTS:
+        return tokens[0]
+    if Path(tokens[0]).name in _PYTHON_NAMES and len(tokens) > 1:
+        if Path(tokens[1]).name in _HARNESS_SCRIPTS:
+            return tokens[1]
+    return None
+
+
+def _is_harness_path(text: str) -> bool:
+    """common/ 또는 저장소 루트에 실제로 있는 하네스 스크립트인지 확인한다."""
+    common = Path(__file__).resolve().parent
+    try:
+        candidate = Path(text).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return False
+    return candidate.parent in {common, common.parent}
+
+
 def is_internal_harness_call(hook: Dict[str, Any]) -> bool:
     if str(hook.get("tool_name") or "") != "Bash":
         return False
     tool_input = hook.get("tool_input") if isinstance(hook.get("tool_input"), dict) else {}
-    command = str(tool_input.get("command") or "")
-    markers = ("mapctl.py", "hook.py", "start-redteam.command")
-    return any(marker in command for marker in markers)
+    command = _expand_common(str(tool_input.get("command") or ""))
+    if not command.strip() or _SUBSTITUTION_RE.search(command):
+        return False
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    if any(token in _CONTROL_TOKENS for token in tokens):
+        return False  # 여러 명령이 붙어 있으면 단일 자기 호출이 아니다
+    script = _harness_script_arg(tokens)
+    return script is not None and _is_harness_path(script)
 
 
 def record_private_evidence(eid: str, phase: str, hook: Dict[str, Any]) -> str:

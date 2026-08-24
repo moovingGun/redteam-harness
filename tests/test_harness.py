@@ -4,13 +4,18 @@
 from __future__ import annotations
 
 import io
+import ipaddress
 import json
 import os
 import shutil
+import socket
 import sys
 import tempfile
+import threading
 import unittest
+import urllib.request
 from contextlib import redirect_stdout
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -184,6 +189,241 @@ class TargetApprovalFlow(unittest.TestCase):
         result = pre("Bash", {"command": "curl http://192.0.2.10/robots.txt"})
         self.assertEqual(decision_of(result), "deny")
         self.assertIn("동기화 대기", result["hookSpecificOutput"]["permissionDecisionReason"])
+
+
+class InternalCallDetection(unittest.TestCase):
+    """하네스 자기 호출 판정은 범위 검사와 이벤트 기록을 통째로 건너뛴다.
+
+    느슨하면 그대로 우회 통로가 되므로, 마커 문자열이 명령 어딘가에 있다는 이유로
+    참이 되어서는 안 된다. 아래는 예전 substring 판정에서 전부 통과하던 형태들이다.
+    """
+
+    def setUp(self) -> None:
+        with engine.locked_state() as state:
+            state.update(engine.default_state())
+        with engine.locked_state() as state:
+            engine.register_initial_target(state, "192.0.2.10", "stage1")
+            engine.render_unlocked(state)
+        clear_pending()
+
+    def _internal(self, command: str) -> bool:
+        return engine.is_internal_harness_call(
+            {"tool_name": "Bash", "tool_input": {"command": command}}
+        )
+
+    def test_real_mapctl_call_is_internal(self) -> None:
+        self.assertTrue(self._internal('python3 "$REDTEAM_COMMON/mapctl.py" status'))
+        self.assertTrue(self._internal("/usr/bin/python3 {0}/mapctl.py status".format(COMMON)))
+
+    def test_marker_in_comment_is_not_internal(self) -> None:
+        self.assertFalse(self._internal("nmap 203.0.113.55  # mapctl.py"))
+
+    def test_marker_as_filename_is_not_internal(self) -> None:
+        self.assertFalse(self._internal("curl http://203.0.113.55/ -o mapctl.py"))
+
+    def test_chained_command_is_not_internal(self) -> None:
+        self.assertFalse(self._internal("echo mapctl.py; nmap 203.0.113.55"))
+        self.assertFalse(self._internal('python3 "$REDTEAM_COMMON/mapctl.py" status && nmap 203.0.113.55'))
+        self.assertFalse(self._internal('python3 "$REDTEAM_COMMON/mapctl.py" status | tee /tmp/out'))
+
+    def test_command_substitution_is_not_internal(self) -> None:
+        self.assertFalse(self._internal('python3 "$REDTEAM_COMMON/mapctl.py" status --x "$(nmap 203.0.113.55)"'))
+        self.assertFalse(self._internal('python3 "$REDTEAM_COMMON/mapctl.py" status --x `nmap 203.0.113.55`'))
+
+    def test_script_outside_harness_is_not_internal(self) -> None:
+        self.assertFalse(self._internal("python3 /tmp/mapctl.py --anything"))
+
+    def test_smuggled_commands_are_denied_by_scope(self) -> None:
+        """판정이 막히면 범위 검사가 이어받아 실제로 거부해야 한다."""
+        for command in (
+            "nmap 203.0.113.55  # mapctl.py",
+            "curl http://203.0.113.55/ -o mapctl.py",
+            "echo mapctl.py; nmap 203.0.113.55",
+        ):
+            with self.subTest(command=command):
+                clear_pending()
+                self.assertEqual(decision_of(pre("Bash", {"command": command})), "deny")
+
+
+class ScopeMatching(unittest.TestCase):
+    def setUp(self) -> None:
+        with engine.locked_state() as state:
+            state.update(engine.default_state())
+        clear_pending()
+
+    def _approve(self, value: str) -> None:
+        with engine.locked_state() as state:
+            engine.register_initial_target(state, value, "stage1")
+            engine.render_unlocked(state)
+
+    def test_cidr_scope_allows_hosts_in_range(self) -> None:
+        self._approve("192.0.2.0/24")
+        clear_pending()
+        self.assertIsNone(decision_of(pre("Bash", {"command": "curl http://192.0.2.10/"})))
+        clear_pending()
+        self.assertIsNone(decision_of(pre("Bash", {"command": "nmap 192.0.2.254"})))
+
+    def test_cidr_scope_still_blocks_outside(self) -> None:
+        self._approve("192.0.2.0/24")
+        clear_pending()
+        self.assertEqual(decision_of(pre("Bash", {"command": "nmap 198.51.100.7"})), "deny")
+
+    def test_single_host_scope_does_not_widen(self) -> None:
+        self._approve("192.0.2.10")
+        clear_pending()
+        self.assertEqual(decision_of(pre("Bash", {"command": "nmap 192.0.2.11"})), "deny")
+
+    def test_decimal_and_hex_ip_forms_are_detected(self) -> None:
+        # 203.0.113.55 를 정수·16진수로 적어도 같은 주소로 해석해야 한다.
+        self.assertIn(
+            ipaddress.IPv4Address("203.0.113.55"),
+            engine.extract_targets("curl http://3405803831/"),
+        )
+        self.assertIn(
+            ipaddress.IPv4Address("203.0.113.55"),
+            engine.extract_targets("curl http://0xCB007137/"),
+        )
+        self._approve("192.0.2.10")
+        clear_pending()
+        self.assertEqual(decision_of(pre("Bash", {"command": "curl http://3405803831/"})), "deny")
+
+    def test_ipv6_literal_is_detected(self) -> None:
+        self.assertIn(
+            ipaddress.IPv6Address("2001:db8::dead:beef"),
+            engine.extract_targets("nmap 2001:db8::dead:beef"),
+        )
+        self._approve("192.0.2.10")
+        clear_pending()
+        self.assertEqual(decision_of(pre("Bash", {"command": "nmap 2001:db8::dead:beef"})), "deny")
+
+    def test_approved_ipv6_is_allowed(self) -> None:
+        self._approve("2001:db8::/32")
+        clear_pending()
+        self.assertIsNone(decision_of(pre("Bash", {"command": "nmap 2001:db8::dead:beef"})))
+
+    def test_ports_and_versions_are_not_read_as_ips(self) -> None:
+        self.assertEqual(engine.extract_targets("listening on 8080 nginx/1.27.5"), set())
+        self.assertEqual(engine.extract_targets("elapsed 1699999999 ms"), set())
+
+
+class DashboardCsrf(unittest.TestCase):
+    """/api/target은 상태를 바꾸는 엔드포인트다.
+
+    client_address만 보면 사용자가 열어둔 아무 웹페이지나 127.0.0.1로 요청을 보내
+    대상을 대신 승인시킬 수 있다. text/plain은 프리플라이트도 없다.
+    """
+
+    server: ThreadingHTTPServer
+    token = "test-token-" + "a" * 32
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import map_viewer
+
+        root = Path(os.environ["REDTEAM_RUN_DIR"])
+        page = (
+            map_viewer.PAGE.replace("__DASHBOARD_LABEL__", "TEST")
+            .replace("__CSRF_TOKEN__", cls.token)
+            .encode("utf-8")
+        )
+
+        def quiet(self, *_args: object) -> None:  # 테스트 출력에 접근 로그를 섞지 않는다
+            return
+
+        handler = type(
+            "TestDashboardHandler",
+            (map_viewer.DashboardHandler,),
+            {
+                "map_path": root / "MAP.md",
+                "events_path": root / "EVENTS.jsonl",
+                "ledger_path": root / "LEDGER.md",
+                "state_path": root / "runtime" / "STATE.json",
+                "page_bytes": page,
+                "stage_filter": None,
+                "csrf_token": cls.token,
+                "allowed_origins": frozenset(),
+                "log_message": quiet,
+            },
+        )
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        cls.port = cls.server.server_address[1]
+        handler.allowed_origins = frozenset({"http://127.0.0.1:{0}".format(cls.port)})
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self) -> None:
+        with engine.locked_state() as state:
+            state.update(engine.default_state())
+        with engine.locked_state() as state:
+            engine.register_initial_target(state, "192.0.2.10", "stage1")
+            engine.render_unlocked(state)
+        self.tid, _, _ = engine.propose_target("203.0.113.55", "E-0001", "테스트")
+
+    def _post(self, headers: dict) -> int:
+        body = json.dumps({"id": self.tid, "action": "approve"}).encode("utf-8")
+        request = "POST /api/target HTTP/1.1\r\nHost: 127.0.0.1:{0}\r\n".format(self.port)
+        for key, value in headers.items():
+            request += "{0}: {1}\r\n".format(key, value)
+        request += "Content-Length: {0}\r\nConnection: close\r\n\r\n".format(len(body))
+        sock = socket.create_connection(("127.0.0.1", self.port), 5)
+        try:
+            sock.sendall(request.encode("utf-8") + body)
+            head = sock.recv(4096).decode("utf-8", "replace").split("\r\n")[0]
+        finally:
+            sock.close()
+        return int(head.split()[1])
+
+    def _status_of(self, tid: str) -> str:
+        with engine.locked_state() as state:
+            return str(state["targets"][tid]["status"])
+
+    def test_cross_origin_simple_request_is_rejected(self) -> None:
+        status = self._post({"Origin": "https://evil.example", "Content-Type": "text/plain"})
+        self.assertEqual(status, 403)
+        self.assertEqual(self._status_of(self.tid), "pending")
+
+    def test_missing_token_is_rejected(self) -> None:
+        self.assertEqual(self._post({"Content-Type": "text/plain"}), 403)
+        self.assertEqual(self._status_of(self.tid), "pending")
+
+    def test_cross_site_fetch_metadata_is_rejected(self) -> None:
+        status = self._post(
+            {
+                "Content-Type": "application/json",
+                "Sec-Fetch-Site": "cross-site",
+                "X-Redteam-Token": self.token,
+            }
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(self._status_of(self.tid), "pending")
+
+    def test_wrong_token_is_rejected(self) -> None:
+        status = self._post({"Content-Type": "application/json", "X-Redteam-Token": "nope"})
+        self.assertEqual(status, 403)
+        self.assertEqual(self._status_of(self.tid), "pending")
+
+    def test_dashboard_request_still_works(self) -> None:
+        status = self._post(
+            {
+                "Origin": "http://127.0.0.1:{0}".format(self.port),
+                "Sec-Fetch-Site": "same-origin",
+                "Content-Type": "application/json",
+                "X-Redteam-Token": self.token,
+            }
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(self._status_of(self.tid), "approved")
+
+    def test_page_carries_the_token(self) -> None:
+        with urllib.request.urlopen("http://127.0.0.1:{0}/".format(self.port), timeout=5) as page:
+            text = page.read().decode("utf-8")
+        self.assertIn(self.token, text)
+        self.assertNotIn("__CSRF_TOKEN__", text)
 
 
 class StageLabelling(unittest.TestCase):
