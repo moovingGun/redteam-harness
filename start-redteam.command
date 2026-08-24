@@ -18,7 +18,7 @@ export REDTEAM_RUN_DIR="$ENGAGEMENT_DIR"
 
 /usr/bin/python3 "$COMMON_DIR/hook.py" bootstrap </dev/null
 
-env PYTHONDONTWRITEBYTECODE=1 REDTEAM_RUN_DIR="$ENGAGEMENT_DIR" /usr/bin/python3 \
+env PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 REDTEAM_RUN_DIR="$ENGAGEMENT_DIR" /usr/bin/python3 \
   "$COMMON_DIR/map_viewer.py" "$ENGAGEMENT_DIR/MAP.md" \
   --label "ENGAGEMENT" --port "$VIEWER_PORT" \
   >"$VIEWER_LOG" 2>&1 &
@@ -28,6 +28,16 @@ cleanup_viewer() {
   kill "$VIEWER_PID" 2>/dev/null || true
 }
 trap cleanup_viewer EXIT INT TERM
+
+# 뷰어가 실제로 연 주소를 실행 창에도 보여준다. 포트가 밀려도 사용자가
+# 주소를 볼 수 있도록, 로그에만 남기지 않고 여기서 한 줄 출력한다.
+for _ in {1..20}; do
+  if grep -q '실시간 지도:' "$VIEWER_LOG" 2>/dev/null; then
+    grep '실시간 지도:' "$VIEWER_LOG"
+    break
+  fi
+  sleep 0.2
+done
 
 claude \
   --settings "$COMMON_DIR/settings.json" \
