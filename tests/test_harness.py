@@ -226,6 +226,16 @@ class InternalCallDetection(unittest.TestCase):
         self.assertFalse(self._internal('python3 "$REDTEAM_COMMON/mapctl.py" status && nmap 203.0.113.55'))
         self.assertFalse(self._internal('python3 "$REDTEAM_COMMON/mapctl.py" status | tee /tmp/out'))
 
+    def test_newline_chained_command_is_not_internal(self) -> None:
+        # 줄바꿈은 shlex가 공백처럼 삼켜 제어 토큰을 남기지 않는다. 첫 줄이 mapctl
+        # 호출인 멀티라인 블록을 internal로 오판하면 나머지 줄이 범위 검사를 건너뛴다.
+        self.assertFalse(
+            self._internal('python3 "$REDTEAM_COMMON/mapctl.py" status\ncurl http://198.51.100.7/')
+        )
+        self.assertFalse(
+            self._internal('python3 "$REDTEAM_COMMON/mapctl.py" status\r\nnmap 203.0.113.55')
+        )
+
     def test_command_substitution_is_not_internal(self) -> None:
         self.assertFalse(self._internal('python3 "$REDTEAM_COMMON/mapctl.py" status --x "$(nmap 203.0.113.55)"'))
         self.assertFalse(self._internal('python3 "$REDTEAM_COMMON/mapctl.py" status --x `nmap 203.0.113.55`'))
@@ -239,6 +249,7 @@ class InternalCallDetection(unittest.TestCase):
             "nmap 203.0.113.55  # mapctl.py",
             "curl http://203.0.113.55/ -o mapctl.py",
             "echo mapctl.py; nmap 203.0.113.55",
+            'python3 "$REDTEAM_COMMON/mapctl.py" status\nnmap 203.0.113.55',
         ):
             with self.subTest(command=command):
                 clear_pending()
@@ -304,6 +315,17 @@ class ScopeMatching(unittest.TestCase):
     def test_ports_and_versions_are_not_read_as_ips(self) -> None:
         self.assertEqual(engine.extract_targets("listening on 8080 nginx/1.27.5"), set())
         self.assertEqual(engine.extract_targets("elapsed 1699999999 ms"), set())
+
+    def test_leading_zero_ip_is_detected_not_crashed(self) -> None:
+        # leading-zero 옥텟은 ipaddress가 예외를 던진다. 정규화해서 크래시 없이
+        # 같은 주소로 탐지해야 한다. 크래시하면 훅이 죽어 범위 검사가 통째로 열린다.
+        self.assertIn(
+            ipaddress.IPv4Address("192.168.1.5"),
+            engine.extract_targets("scan 192.168.001.5"),
+        )
+        self._approve("192.0.2.10")
+        clear_pending()
+        self.assertEqual(decision_of(pre("Bash", {"command": "nmap 192.168.001.5"})), "deny")
 
 
 class DashboardCsrf(unittest.TestCase):
