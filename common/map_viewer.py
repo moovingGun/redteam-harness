@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import html
 import json
 import os
+import secrets
 import socket
 import threading
 import webbrowser
@@ -305,11 +307,15 @@ PAGE = r"""<!doctype html>
     keepScroll(box,paint);
   }
 
+  // 이 페이지에서만 승인할 수 있게 하는 실행별 토큰. 커스텀 헤더라 크로스오리진
+  // 요청은 프리플라이트를 거쳐야 하고, 서버가 CORS를 허용하지 않아 실패한다.
+  const CSRF_TOKEN='__CSRF_TOKEN__';
+
   let busyTarget=null;
   async function decideTarget(id,action){
     if(busyTarget)return; busyTarget=id;
     try{
-      const response=await fetch('/api/target',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,action})});
+      const response=await fetch('/api/target',{method:'POST',headers:{'Content-Type':'application/json','X-Redteam-Token':CSRF_TOKEN},body:JSON.stringify({id,action})});
       if(!response.ok){const detail=await response.text();alert('처리 실패: '+detail)}
       lastVersion=''; await poll();
     }catch(error){alert('처리 실패: '+error.message)}
@@ -431,6 +437,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
     state_path: Path
     page_bytes: bytes
     stage_filter: str | None
+    csrf_token: str = ""
+    allowed_origins: frozenset[str] = frozenset()
 
     def _headers(self, status: int, content_type: str, length: int) -> None:
         self.send_response(status)
@@ -464,8 +472,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._reply(404, {"error": "not found"})
             return
         # 로컬 대시보드에서만 승인할 수 있게 한다.
+        #
+        # client_address만으로는 부족하다. 사용자가 브라우저로 아무 사이트나 열어두면
+        # 그 페이지가 127.0.0.1로 요청을 보낼 수 있고, Content-Type을 text/plain으로
+        # 두면 프리플라이트도 없이 통과한다(CSRF). 그래서 실행별 토큰을 커스텀 헤더로
+        # 요구하고 Origin·Sec-Fetch-Site도 함께 확인한다.
         if self.client_address[0] not in {"127.0.0.1", "::1"}:
             self._reply(403, {"error": "local only"})
+            return
+        origin = self.headers.get("Origin")
+        if origin and origin not in self.allowed_origins:
+            self._reply(403, {"error": "bad origin"})
+            return
+        fetch_site = (self.headers.get("Sec-Fetch-Site") or "").lower()
+        if fetch_site and fetch_site not in {"same-origin", "none"}:
+            self._reply(403, {"error": "cross-site request rejected"})
+            return
+        token = self.headers.get("X-Redteam-Token") or ""
+        if not self.csrf_token or not hmac.compare_digest(token, self.csrf_token):
+            self._reply(403, {"error": "bad or missing token; 대시보드 페이지에서 승인하세요"})
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -616,7 +641,13 @@ def main() -> None:
     # 승인 버튼이 engine과 같은 engagement 루트를 쓰도록 맞춘다.
     os.environ.setdefault("REDTEAM_RUN_DIR", str(map_path.parent))
     port = available_port(args.port)
-    page_bytes = PAGE.replace("__DASHBOARD_LABEL__", html.escape(args.label)).encode("utf-8")
+    # 실행마다 새로 만드는 승인 토큰. 페이지에 심어 두고 POST에서 다시 확인한다.
+    csrf_token = secrets.token_urlsafe(32)
+    page_bytes = (
+        PAGE.replace("__DASHBOARD_LABEL__", html.escape(args.label))
+        .replace("__CSRF_TOKEN__", csrf_token)
+        .encode("utf-8")
+    )
     handler = type(
         "ConfiguredDashboardHandler",
         (DashboardHandler,),
@@ -627,6 +658,14 @@ def main() -> None:
             "state_path": state_path,
             "page_bytes": page_bytes,
             "stage_filter": args.stage,
+            "csrf_token": csrf_token,
+            "allowed_origins": frozenset(
+                {
+                    f"http://127.0.0.1:{port}",
+                    f"http://localhost:{port}",
+                    f"http://[::1]:{port}",
+                }
+            ),
         },
     )
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)

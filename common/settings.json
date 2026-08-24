@@ -7,7 +7,7 @@
             "type": "command",
             "command": "/usr/bin/python3",
             "args": [
-              "${CLAUDE_PROJECT_DIR}/../../common/hook.py",
+              "${CLAUDE_PROJECT_DIR}/../common/hook.py",
               "session"
             ],
             "timeout": 10
@@ -22,7 +22,7 @@
             "type": "command",
             "command": "/usr/bin/python3",
             "args": [
-              "${CLAUDE_PROJECT_DIR}/../../common/hook.py",
+              "${CLAUDE_PROJECT_DIR}/../common/hook.py",
               "pre"
             ],
             "timeout": 10
@@ -37,7 +37,7 @@
             "type": "command",
             "command": "/usr/bin/python3",
             "args": [
-              "${CLAUDE_PROJECT_DIR}/../../common/hook.py",
+              "${CLAUDE_PROJECT_DIR}/../common/hook.py",
               "post"
             ],
             "timeout": 20
@@ -52,7 +52,7 @@
             "type": "command",
             "command": "/usr/bin/python3",
             "args": [
-              "${CLAUDE_PROJECT_DIR}/../../common/hook.py",
+              "${CLAUDE_PROJECT_DIR}/../common/hook.py",
               "failure"
             ],
             "timeout": 20
