@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -155,6 +156,101 @@ def append_jsonl(path: Path, value: Dict[str, Any]) -> None:
         pass
 
 
+# -------------------------------------------------------- 실행 텔레메트리
+#
+# 이 하네스는 같은 문제를 구성만 바꿔가며 여러 번 돌린 뒤 구성끼리 비교하는 데 쓴다.
+# 그러려면 EVENTS.jsonl의 한 줄만 보고도 "어느 실행의, 어떤 구성에서, 어떤 코드
+# 버전으로, 얼마나 데이터가 오갔는지"를 알 수 있어야 한다. 나중에 폴더 이름이나
+# 실행 시각으로 유추하면 실행이 겹치거나 폴더를 옮기는 순간 조용히 어긋난다.
+
+_RUN_META: Optional[Dict[str, str]] = None
+
+
+def _clean_label(value: Any, limit: int = 80) -> str:
+    return " ".join(str(value).split())[:limit]
+
+
+def _detect_harness_rev() -> str:
+    """공용 코드의 git 리비전. 워킹트리가 더러우면 -dirty를 붙인다.
+
+    커밋 해시만 남기면 같은 rev로 묶인 두 실행이 실제로는 서로 다른 코드였을 수
+    있고, 그러면 구성 비교 결과가 조용히 섞인다. 그 경우를 눈에 보이게 만든다.
+    """
+    repo = Path(__file__).resolve().parent.parent
+
+    def git(*args: str) -> Optional[str]:
+        try:
+            proc = subprocess.run(
+                ("git", "-C", str(repo)) + args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if proc.returncode != 0:
+            return None
+        return proc.stdout.decode("utf-8", "replace").strip()
+
+    rev = git("rev-parse", "--short", "HEAD")
+    if not rev:
+        return "unknown"
+    return rev + "-dirty" if git("status", "--porcelain") else rev
+
+
+def _run_id_from_layout() -> str:
+    """runs/<run_id>/engagement 구조라면 폴더 이름이 곧 실행 ID다."""
+    parent = ROOT.parent
+    if parent.parent.name == "runs" and parent.name:
+        return parent.name
+    return "unknown"
+
+
+def run_meta() -> Dict[str, str]:
+    """이번 실행을 식별하는 세 값. 런처가 넘긴 환경변수를 우선 쓴다.
+
+    한 프로세스 안에서는 고정한다. 훅은 도구 호출마다 새 프로세스로 뜨므로 이
+    캐시는 프로세스 수명만큼만 살고, 대신 git 조회가 이벤트마다 반복되지 않는다.
+    """
+    global _RUN_META
+    if _RUN_META is None:
+        _RUN_META = {
+            "run_id": _clean_label(os.environ.get("REDTEAM_RUN_ID") or _run_id_from_layout()),
+            "config_label": _clean_label(os.environ.get("REDTEAM_CONFIG_LABEL") or "default"),
+            "harness_rev": _clean_label(
+                os.environ.get("REDTEAM_HARNESS_REV") or _detect_harness_rev()
+            ),
+        }
+    return dict(_RUN_META)
+
+
+def payload_bytes(value: Any) -> int:
+    """도구 입력·응답이 실제로 옮긴 바이트 수. 구성별 I/O 비교의 기준값이다."""
+    if value is None:
+        return 0
+    if isinstance(value, (bytes, bytearray)):
+        return len(value)
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    try:
+        return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError):
+        return len(str(value).encode("utf-8"))
+
+
+def append_event(value: Dict[str, Any]) -> None:
+    """EVENTS.jsonl 한 줄.
+
+    이벤트를 쓰는 자리가 훅·mapctl로 흩어져 있어 한 곳만 고치면 일부 줄에서
+    실행 식별자가 빠진다. 그러면 집계에서 그 줄들이 통째로 사라지므로 모든
+    이벤트 기록을 이 함수 하나로 모은다.
+    """
+    record = dict(value)
+    record.setdefault("io_bytes", 0)
+    record.update(run_meta())
+    append_jsonl(EVENTS_PATH, record)
+
+
 def event_id(number: int) -> str:
     return "E-{0:04d}".format(number)
 
@@ -211,6 +307,40 @@ def pending_targets(state: Dict[str, Any]) -> List[Dict[str, Any]]:
             entry["id"] = tid
             result.append(entry)
     return result
+
+
+SETTINGS_TEMPLATE = Path(__file__).resolve().parent / "settings.json"
+HARNESS_COMMON_TOKEN = "__HARNESS_COMMON__"
+
+
+def prepare_run(run_dir: Path) -> Dict[str, str]:
+    """실행 폴더에 훅 설정과 실행 메타를 굳힌다.
+
+    훅 경로를 절대 경로로 박는 이유: 실행 폴더가 runs/<run_id>/engagement로
+    깊어지면서 `${CLAUDE_PROJECT_DIR}/../common` 같은 깊이 의존 배선은 폴더 구조를
+    한 단계만 바꿔도 조용히 끊긴다. 이 저장소에서 실제로 그 회귀가 났고, 훅이
+    전부 로드되지 않은 채로 테스트는 모두 통과했다. 깊이를 세지 않는다.
+
+    RUN.json을 따로 남기는 이유: 이벤트가 하나도 없는 실행도 구성 비교에서는
+    "그 구성으로 아무것도 하지 못했다"는 결과다. EVENTS.jsonl만 읽으면 그런
+    실행이 집계에서 통째로 빠져 비교가 성공한 실행 쪽으로 치우친다.
+    """
+    run_dir = Path(run_dir).expanduser().resolve()
+    common = str(SETTINGS_TEMPLATE.parent)
+    template = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
+    if HARNESS_COMMON_TOKEN not in template:
+        raise SystemExit(
+            "settings.json에 {0} 자리표시자가 없습니다. 훅 배선이 실행 폴더를 "
+            "가리키게 되어 훅이 로드되지 않습니다.".format(HARNESS_COMMON_TOKEN)
+        )
+    # 경로에 따옴표·역슬래시가 있어도 JSON이 깨지지 않도록 문자열 리터럴 규칙으로 이스케이프한다.
+    rendered = template.replace(HARNESS_COMMON_TOKEN, json.dumps(common)[1:-1])
+    json.loads(rendered)  # 깨진 설정으로 실행되면 훅 없이 조용히 진행된다
+    _atomic_text(run_dir / "settings.json", rendered)
+
+    manifest = dict(run_meta(), started_at=utc_now())
+    _atomic_text(run_dir / "RUN.json", json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    return manifest
 
 
 def ensure_stage_workspace(stage: str, target: str = "") -> Path:

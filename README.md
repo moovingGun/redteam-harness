@@ -112,6 +112,22 @@ Linux·Windows에서는 그대로 동작하지 않는다. 옮기려면 각 `star
 2. 열린 Claude에 **시작 IP 하나**와 허용 범위, 최종 목표를 말한다.
 3. 실시간 지도(`http://127.0.0.1:8765`)가 자동으로 열린다.
 
+실행할 때마다 `runs/<run_id>/engagement/`가 새로 만들어지고 그 실행의 모든 기록이
+거기에만 쌓인다. 실행 ID와 구성 이름은 시작 시 실행 창에 출력된다.
+
+```bash
+./start-redteam.command                              # 실행 ID 자동 생성, 구성 이름 default
+REDTEAM_CONFIG_LABEL="프롬프트-A" ./start-redteam.command   # 비교할 구성에 이름을 붙인다
+REDTEAM_RUN_ID="2026-08-26-1차" ./start-redteam.command     # 실행 폴더 이름을 직접 정한다
+```
+
+| 환경변수 | 기본값 | 뜻 |
+|---|---|---|
+| `REDTEAM_RUN_ID` | 시각 + 난수 | 실행 폴더 이름이자 실행 식별자. `/`와 `..`는 쓸 수 없다. |
+| `REDTEAM_CONFIG_LABEL` | `default` | 비교 단위. 같은 라벨을 붙인 실행들이 한 그룹으로 묶인다. |
+| `REDTEAM_PORT` | `8765` | 실시간 지도 포트. |
+| `REDTEAM_SCOPE_ENFORCE` | `1` | `0`이면 범위 차단을 끈다. |
+
 Stage를 미리 고르지 않는다. 하나의 IP로 시작하고, 탐색 중 다음 경계로 이어지는 새 IP가 나오면 승인하는 시점에 다음 Stage가 열린다.
 
 Claude가 종료되면 뷰어도 함께 종료된다. 포트가 이미 사용 중이면 다음 빈 포트로 자동 이동하며, 실제 주소는 실행 창에 출력된다.
@@ -154,21 +170,76 @@ python3 common/mapctl.py target-reject  --id T-03 --reason "범위 밖"
 |---|---|
 | Stage 라벨 | 다음 번호가 자동 배정된다 (`stage2`, `stage3`…) |
 | FOCUS 가지 | 새 대상용 `B-*`가 생기고 이전 FOCUS는 OPEN으로 내려간다 |
-| 작업 폴더 | `engagement/work/stageN/`이 만들어진다 |
+| 작업 폴더 | `work/stageN/`이 만들어진다 (실행 폴더 안) |
 | 차단 해제 | 그 IP로의 행동이 허용된다 |
 | 기록 | E/C/B 번호와 MAP·LEDGER는 끊기지 않고 이어진다 |
+
+## 구성별 비교
+
+프롬프트나 설정을 바꿔가며 여러 번 돌린 뒤, 어느 구성이 실제로 무엇이 달랐는지 같은 축에서 본다.
+실행마다 기록이 격리되어 있으므로 사후에 실행 경계를 추측할 필요가 없다.
+
+```bash
+REDTEAM_CONFIG_LABEL=baseline ./start-redteam.command
+REDTEAM_CONFIG_LABEL=baseline ./start-redteam.command
+REDTEAM_CONFIG_LABEL=tuned    ./start-redteam.command
+
+python3 common/runstat.py            # 구성별 비교표
+python3 common/runstat.py --per-run  # 실행별 상세까지
+python3 common/runstat.py --json     # 그대로 가공할 때
+```
+
+```
+config    runs  empty  actions    clues  stages  ok%   io           duration
+--------  ----  -----  ---------  -----  ------  ----  -----------  --------
+baseline  2     0      1.5 (1.5)  0.0    1       67%   1.2K (1.2K)  21.4s
+tuned     2     1      0.5 (0.5)  0.5    1       100%  2.5K (2.5K)  0.1s
+```
+
+`EVENTS.jsonl`의 모든 줄이 아래 네 값을 함께 들고 있어서, 줄 하나만 봐도 어느 실행의 것인지 알 수 있다.
+
+| 필드 | 뜻 |
+|---|---|
+| `run_id` | 실행 식별자. `runs/<run_id>/` 폴더 이름과 같다. |
+| `config_label` | 비교 그룹 이름. `runstat`이 이 값으로 묶는다. |
+| `harness_rev` | 그 실행에 쓰인 하네스 코드의 git 리비전. 워킹트리가 수정된 상태였으면 `-dirty`가 붙는다. |
+| `io_bytes` | 그 줄이 옮긴 바이트 수. `phase:"start"`는 도구로 들어간 입력, `phase:"finish"`는 도구가 돌려준 응답, `phase:"classification"`은 외부 I/O가 없으므로 0. |
+
+읽을 때 주의할 것.
+
+- `empty` 열은 행동을 하나도 남기지 못한 실행 수다. 이 실행들도 평균에 0으로 들어간다. 집계에서 빼면 비교가 성공한 실행 쪽으로 치우치므로 빼지 않고, 대신 몇 건인지 따로 보여준다.
+- `ok%`는 실행별 성공률의 평균이 아니라 그룹의 전체 시도를 모아 계산한 비율이다. 행동 수가 제각각인 실행을 같은 무게로 평균 내면 짧은 실행이 과대 대표된다.
+- 한 구성 안에서 `harness_rev`가 섞이면 경고를 출력한다. 그 행의 차이는 구성 차이인지 코드 차이인지 구분할 수 없다.
+- 이것은 **활동량 지표이지 성과 지표가 아니다.** 행동이 많거나 I/O가 크다고 더 나은 탐색은 아니다. 무엇이 더 나았는지는 여전히 사람이 증적을 보고 판단한다.
 
 ## 폴더 역할
 
 - `start-redteam.command`: 유일한 실행기. 문제 하나를 처음부터 끝까지 이것으로 진행한다.
-- `common/`: 재사용 코드, Hook 설정, 중립 프롬프트, 뷰어. 특정 대상의 답·단서·증적을 넣지 않는다.
-- `engagement/runtime/`, `MAP.md`, `LEDGER.md`, `EVENTS.jsonl`, `DECISIONS.jsonl`, `evidence/`: 모든 Stage가 이어 쓰는 전체 문제 기록. 하네스가 소유하며 직접 편집하지 않는다.
-- `engagement/work/stageN/`: Stage 승인 시 자동 생성되는 작업 폴더. 스캔 결과·페이로드·임시 스크립트처럼 그 단계에서 새로 만드는 파일을 둔다. Git에서 제외된다.
+- `common/`: 재사용 코드, Hook 설정, 중립 프롬프트, 뷰어, 집계기. 특정 대상의 답·단서·증적을 넣지 않는다.
+- `runs/<run_id>/`: 실행 하나가 통째로 들어가는 폴더. Git에서 제외된다.
 - `tests/`: 승인 흐름과 범위 차단 검증.
+
+실행 폴더 안은 이렇게 나뉜다.
+
+```
+runs/<run_id>/
+├── RUN.json          실행 ID·구성 이름·하네스 리비전·시작 시각
+├── settings.json     이 실행에 쓰인 훅 배선 (절대 경로로 굳혀 생성)
+└── engagement/       CLAUDE_PROJECT_DIR. 여기서 claude가 뜬다
+    ├── MAP.md, LEDGER.md, EVENTS.jsonl, DECISIONS.jsonl
+    ├── runtime/, evidence/     하네스가 소유한다. 직접 편집하지 않는다
+    └── work/stageN/            Stage 승인 시 생기는 작업 폴더
+```
 
 기록 파일과 작업 파일이 섞이지 않도록 자리를 나눴다. 하네스가 만드는 것은 `engagement/` 바로 아래, 사람과 AI가 만드는 것은 `engagement/work/stageN/` 아래다.
 
-Stage가 바뀌어도 전체 문제 기록은 상위 `engagement/`에서 계속 누적된다. 공용 폴더에는 방법론과 작동 코드만 둔다.
+Stage가 바뀌어도 전체 문제 기록은 그 실행의 `engagement/`에서 계속 누적된다. 반대로 **실행이 바뀌면 기록은 이어지지 않는다.** 한 폴더에 계속 이어 쓰면 어느 이벤트가 어느 실행 것인지 사후에 갈라낼 수 없고, 앞선 실행의 MAP·STATE가 다음 실행의 출발점을 오염시킨다. 공용 폴더에는 방법론과 작동 코드만 둔다.
+
+> 훅 배선을 실행마다 다시 생성하는 이유. `common/settings.json`은 훅 경로를 `__HARNESS_COMMON__`
+> 자리표시자로 들고 있는 템플릿이고, 실행 시작 시 절대 경로로 펼쳐져 `runs/<run_id>/settings.json`이
+> 된다. 예전처럼 `${CLAUDE_PROJECT_DIR}/../common` 같은 깊이 의존 경로를 쓰면 실행 폴더가 한 단계
+> 깊어지는 순간 모든 훅이 조용히 로드 실패한다. 실제로 그 회귀가 한 번 났고, 훅이 하나도 뜨지 않은
+> 채로 테스트는 전부 통과했다.
 
 ## 라이선스
 

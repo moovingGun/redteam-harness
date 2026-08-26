@@ -11,13 +11,14 @@ from typing import Any, Dict
 
 try:
     from engine import (
-        EVENTS_PATH,
         allocate_event,
-        append_jsonl,
+        append_event,
         bootstrap,
         ensure_agent_branch,
         is_internal_harness_call,
         locked_state,
+        payload_bytes,
+        prepare_run,
         record_private_evidence,
         render_unlocked,
         safe_action_label,
@@ -81,6 +82,18 @@ def reachable_text(hook: Dict[str, Any]) -> str:
         return json.dumps(tool_input, ensure_ascii=False)
     except (TypeError, ValueError):
         return str(tool_input)
+
+
+# 실패 훅과 성공 훅은 결과를 담는 키가 다르다. 먼저 있는 키 하나를 결과로 본다.
+_RESPONSE_KEYS = ("tool_response", "tool_result", "error")
+
+
+def response_bytes(hook: Dict[str, Any]) -> int:
+    """도구가 돌려준 결과의 바이트 수. 구성별 I/O 비교에서 응답 쪽 값이 된다."""
+    for key in _RESPONSE_KEYS:
+        if key in hook:
+            return payload_bytes(hook[key])
+    return 0
 
 
 def deny_for_scope(blocked: list[str]) -> None:
@@ -167,8 +180,7 @@ def handle_pre(hook: Dict[str, Any]) -> None:
         state["branches"][branch]["activity"] = int(state["branches"][branch].get("activity", 0)) + 1
         state["branches"][branch]["recent_event"] = eid
         evidence_path = record_private_evidence(eid, "pre", hook)
-        append_jsonl(
-            EVENTS_PATH,
+        append_event(
             {
                 "event_id": eid,
                 "ts_utc": started,
@@ -181,7 +193,9 @@ def handle_pre(hook: Dict[str, Any]) -> None:
                 "scope_ref": action,
                 "evidence_path": evidence_path,
                 "phase": "start",
-            },
+                # start 줄의 io_bytes는 도구로 들어간 입력 크기다. finish 줄은 응답 크기다.
+                "io_bytes": payload_bytes(hook.get("tool_input")),
+            }
         )
         render_unlocked(state)
 
@@ -215,8 +229,7 @@ def _finish(hook: Dict[str, Any], failed: bool) -> None:
         item["status"] = "AWAITING_CLASSIFICATION" if strict else "AUTO_CLASSIFIED"
         status = "failed" if failed else "success"
         evidence_path = record_private_evidence(eid, "failure" if failed else "post", hook)
-        append_jsonl(
-            EVENTS_PATH,
+        append_event(
             {
                 "event_id": eid,
                 "ts_utc": utc_now(),
@@ -235,7 +248,8 @@ def _finish(hook: Dict[str, Any], failed: bool) -> None:
                 "clue_ids": [],
                 "map_changed": True,
                 "phase": "finish",
-            },
+                "io_bytes": response_bytes(hook),
+            }
         )
         if not strict:
             del state["pending"][eid]
@@ -303,6 +317,10 @@ def main() -> None:
         raise SystemExit("engine 로드 실패: " + IMPORT_ERROR)
     if mode in ("session", "bootstrap"):
         bootstrap()
+    elif mode == "prepare-run":
+        if len(sys.argv) < 3:
+            raise SystemExit("prepare-run: 실행 폴더 경로가 필요합니다")
+        print(json.dumps(prepare_run(Path(sys.argv[2])), ensure_ascii=False))
     elif mode == "post":
         _finish(hook, failed=False)
     elif mode == "failure":

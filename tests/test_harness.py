@@ -457,8 +457,9 @@ class HookWiring(unittest.TestCase):
     경로가 틀리면 E-ID 발급·범위 차단·지도 동기화가 통째로 죽는다.
     """
 
-    def _hook_specs(self) -> list[tuple[str, list[str]]]:
-        settings = json.loads((COMMON / "settings.json").read_text(encoding="utf-8"))
+    def _hook_specs(self, settings: dict | None = None) -> list[tuple[str, list[str]]]:
+        if settings is None:
+            settings = json.loads((COMMON / "settings.json").read_text(encoding="utf-8"))
         specs = []
         for event, entries in settings["hooks"].items():
             for entry in entries:
@@ -468,31 +469,55 @@ class HookWiring(unittest.TestCase):
                         specs.append((event, [str(arg) for arg in args]))
         return specs
 
-    def test_settings_hook_paths_resolve_to_real_file(self) -> None:
-        # launcher가 cd 하는 위치가 곧 CLAUDE_PROJECT_DIR이다.
-        project_dir = ROOT / "engagement"
-        specs = self._hook_specs()
-        self.assertTrue(specs, "settings.json에서 hook.py 배선을 찾지 못했다")
+    def test_settings_template_uses_the_absolute_path_token(self) -> None:
+        # 상대 경로 배선으로 되돌아가면 실행 폴더 깊이가 바뀌는 순간 다시 끊긴다.
+        raw = (COMMON / "settings.json").read_text(encoding="utf-8")
+        self.assertIn(engine.HARNESS_COMMON_TOKEN, raw)
+        self.assertNotIn("CLAUDE_PROJECT_DIR", raw)
+
+    def test_rendered_settings_hook_paths_resolve_to_real_file(self) -> None:
+        # 실제로 claude에 넘어가는 것은 prepare_run이 만든 실행별 settings.json이다.
+        run_dir = Path(_TEMP.name) / "render-check"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        engine.prepare_run(run_dir)
+        settings = json.loads((run_dir / "settings.json").read_text(encoding="utf-8"))
+        specs = self._hook_specs(settings)
+        self.assertTrue(specs, "렌더된 settings.json에서 hook.py 배선을 찾지 못했다")
         for event, args in specs:
-            resolved = Path(args[0].replace("${CLAUDE_PROJECT_DIR}", str(project_dir))).resolve()
+            resolved = Path(args[0]).resolve()
             self.assertTrue(
-                resolved.exists(),
-                "{0} 훅 경로가 실제 파일이 아니다: {1} -> {2}".format(event, args[0], resolved),
+                resolved.is_absolute(),
+                "{0} 훅 경로가 절대 경로가 아니다: {1}".format(event, args[0]),
             )
-            self.assertEqual(resolved, (COMMON / "hook.py").resolve())
+            self.assertEqual(
+                resolved,
+                (COMMON / "hook.py").resolve(),
+                "{0} 훅 경로가 실제 hook.py가 아니다: {1}".format(event, args[0]),
+            )
 
     def test_settings_hook_modes_are_understood(self) -> None:
         # 모드 문자열이 틀리면 hook.main이 SystemExit으로 죽는다.
         for event, args in self._hook_specs():
             self.assertGreater(len(args), 1, "{0}: 모드 인자가 없다".format(event))
-            self.assertIn(args[1], {"session", "bootstrap", "pre", "post", "failure"})
+            self.assertIn(args[1], {"session", "bootstrap", "prepare-run", "pre", "post", "failure"})
 
-    def test_launcher_runs_claude_from_engagement_dir(self) -> None:
-        # 위 경로 검증은 launcher가 engagement/에서 claude를 띄운다는 전제 위에 있다.
-        # 그 전제가 바뀌면 상대 경로가 다시 어긋나므로 여기서 고정한다.
+    def test_launcher_isolates_each_run_and_uses_rendered_settings(self) -> None:
+        # 배선 검증은 launcher가 실행별 settings.json을 넘긴다는 전제 위에 있다.
+        # 다시 common/settings.json을 직접 넘기면 __HARNESS_COMMON__이 펼쳐지지
+        # 않은 채로 claude에 들어가 훅이 통째로 죽는다.
         text = (ROOT / "start-redteam.command").read_text(encoding="utf-8")
-        self.assertIn('ENGAGEMENT_DIR="$ROOT_DIR/engagement"', text)
+        self.assertIn('RUN_DIR="$ROOT_DIR/runs/$RUN_ID"', text)
+        self.assertIn('ENGAGEMENT_DIR="$RUN_DIR/engagement"', text)
         self.assertIn('cd "$ENGAGEMENT_DIR"', text)
+        self.assertIn('prepare-run "$RUN_DIR"', text)
+        self.assertIn('--settings "$SETTINGS_FILE"', text)
+        self.assertNotIn('--settings "$COMMON_DIR/settings.json"', text)
+
+    def test_launcher_exports_run_identity(self) -> None:
+        # 이 세 값이 환경으로 넘어가지 않으면 EVENTS.jsonl이 실행을 식별하지 못한다.
+        text = (ROOT / "start-redteam.command").read_text(encoding="utf-8")
+        for name in ("REDTEAM_RUN_ID", "REDTEAM_CONFIG_LABEL", "REDTEAM_HARNESS_REV"):
+            self.assertIn("export {0}=".format(name), text)
 
 
 class HookFailsClosed(unittest.TestCase):
@@ -536,6 +561,220 @@ class HookFailsClosed(unittest.TestCase):
             hook._EMITTED = False
         self.assertEqual(len(lines), 1, "결정 JSON은 한 번만 출력되어야 한다")
         self.assertEqual(json.loads(lines[0])["hookSpecificOutput"]["permissionDecisionReason"], "먼저 낸 결정")
+
+
+class RunTelemetry(unittest.TestCase):
+    """EVENTS.jsonl 한 줄만 보고 어느 실행·구성·코드였는지 알 수 있어야 한다.
+
+    이 값들이 일부 줄에서만 빠져도 구성별 집계는 조용히 그 줄들을 잃는다.
+    빠졌다는 신호가 없으므로 결과는 그냥 조금 다르게 나올 뿐이다.
+    """
+
+    def setUp(self) -> None:
+        os.environ["REDTEAM_RUN_ID"] = "20260826T000000Z-test"
+        os.environ["REDTEAM_CONFIG_LABEL"] = "테스트 구성"
+        os.environ["REDTEAM_HARNESS_REV"] = "abc1234-dirty"
+        engine._RUN_META = None  # run_meta는 프로세스 단위로 캐시된다
+        engine.EVENTS_PATH.unlink(missing_ok=True)
+        with engine.locked_state() as state:
+            state.update(engine.default_state())
+        with engine.locked_state() as state:
+            engine.register_initial_target(state, "192.0.2.10", "stage1")
+            engine.render_unlocked(state)
+        clear_pending()
+
+    def tearDown(self) -> None:
+        for name in ("REDTEAM_RUN_ID", "REDTEAM_CONFIG_LABEL", "REDTEAM_HARNESS_REV"):
+            os.environ.pop(name, None)
+        engine._RUN_META = None
+
+    def _events(self) -> list[dict]:
+        text = engine.EVENTS_PATH.read_text(encoding="utf-8")
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+    def _assert_identity(self, event: dict) -> None:
+        self.assertEqual(event["run_id"], "20260826T000000Z-test")
+        self.assertEqual(event["config_label"], "테스트 구성")
+        self.assertEqual(event["harness_rev"], "abc1234-dirty")
+        self.assertIn("io_bytes", event)
+
+    def test_start_event_carries_identity_and_input_bytes(self) -> None:
+        tool_input = {"command": "curl http://192.0.2.10/"}
+        pre("Bash", tool_input)
+        event = self._events()[-1]
+        self.assertEqual(event["phase"], "start")
+        self._assert_identity(event)
+        self.assertEqual(
+            event["io_bytes"],
+            len(json.dumps(tool_input, ensure_ascii=False).encode("utf-8")),
+        )
+
+    def test_finish_event_records_response_bytes(self) -> None:
+        pre("Bash", {"command": "curl http://192.0.2.10/"})
+        with engine.locked_state() as state:
+            tool_use_id = next(iter(state["tool_map"]))
+        response = "A" * 500
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            hook._finish(
+                {
+                    "tool_name": "Bash",
+                    "tool_use_id": tool_use_id,
+                    "agent_id": "main",
+                    "tool_response": response,
+                },
+                failed=False,
+            )
+        event = self._events()[-1]
+        self.assertEqual(event["phase"], "finish")
+        self._assert_identity(event)
+        self.assertEqual(event["io_bytes"], 500)
+
+    def test_classification_event_carries_identity_with_zero_io(self) -> None:
+        # 분류 줄이 실행 식별자를 빼먹으면 단서 수 집계만 통째로 어긋난다.
+        pre("Bash", {"command": "curl http://192.0.2.10/"})
+        with engine.locked_state() as state:
+            eid = next(iter(state["pending"]))
+            item = dict(state["pending"][eid])
+        import mapctl
+
+        mapctl.append_classification(eid, item, "변화 없음", "closed", [])
+        event = self._events()[-1]
+        self.assertEqual(event["phase"], "classification")
+        self._assert_identity(event)
+        self.assertEqual(event["io_bytes"], 0)
+
+    def test_missing_env_falls_back_to_run_folder_name(self) -> None:
+        # runs/<run_id>/engagement 구조면 폴더 이름이 곧 실행 ID다.
+        for name in ("REDTEAM_RUN_ID", "REDTEAM_CONFIG_LABEL", "REDTEAM_HARNESS_REV"):
+            os.environ.pop(name, None)
+        engine._RUN_META = None
+        original = engine.ROOT
+        engine.ROOT = Path("/somewhere/runs/20260826T010203Z-9f2a/engagement")
+        try:
+            meta = engine.run_meta()
+        finally:
+            engine.ROOT = original
+            engine._RUN_META = None
+        self.assertEqual(meta["run_id"], "20260826T010203Z-9f2a")
+        self.assertEqual(meta["config_label"], "default")
+
+    def test_payload_bytes_counts_utf8_not_characters(self) -> None:
+        self.assertEqual(engine.payload_bytes("가나다"), 9)
+        self.assertEqual(engine.payload_bytes(None), 0)
+        self.assertEqual(engine.payload_bytes(b"1234"), 4)
+
+
+class RunPreparation(unittest.TestCase):
+    def test_prepare_run_writes_manifest_and_settings(self) -> None:
+        os.environ["REDTEAM_RUN_ID"] = "20260826T000000Z-prep"
+        os.environ["REDTEAM_CONFIG_LABEL"] = "prep"
+        os.environ["REDTEAM_HARNESS_REV"] = "deadbee"
+        engine._RUN_META = None
+        run_dir = Path(_TEMP.name) / "prep-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            manifest = engine.prepare_run(run_dir)
+        finally:
+            for name in ("REDTEAM_RUN_ID", "REDTEAM_CONFIG_LABEL", "REDTEAM_HARNESS_REV"):
+                os.environ.pop(name, None)
+            engine._RUN_META = None
+
+        self.assertEqual(manifest["run_id"], "20260826T000000Z-prep")
+        stored = json.loads((run_dir / "RUN.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored["config_label"], "prep")
+        self.assertEqual(stored["harness_rev"], "deadbee")
+        self.assertIn("started_at", stored)
+
+        rendered = (run_dir / "settings.json").read_text(encoding="utf-8")
+        self.assertNotIn(engine.HARNESS_COMMON_TOKEN, rendered)
+        json.loads(rendered)
+
+
+class RunStatAggregation(unittest.TestCase):
+    """구성별 비교 집계. 실패하거나 빈 실행이 조용히 사라지면 비교가 편향된다."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import runstat
+
+        cls.runstat = runstat
+        cls.runs_dir = Path(_TEMP.name) / "runstat" / "runs"
+
+        def make_run(run_id: str, config: str, rev: str, events: list[dict]) -> None:
+            engagement = cls.runs_dir / run_id / "engagement"
+            engagement.mkdir(parents=True, exist_ok=True)
+            (cls.runs_dir / run_id / "RUN.json").write_text(
+                json.dumps({"run_id": run_id, "config_label": config, "harness_rev": rev}),
+                encoding="utf-8",
+            )
+            (engagement / "EVENTS.jsonl").write_text(
+                "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+            )
+
+        def action(eid: str, ok: bool, io_in: int, io_out: int, second: int) -> list[dict]:
+            stamp = "2026-08-26T00:00:{0:02d}.000Z".format(second)
+            return [
+                {"event_id": eid, "phase": "start", "ts_utc": stamp, "io_bytes": io_in, "stage_id": "stage1"},
+                {
+                    "event_id": eid,
+                    "phase": "finish",
+                    "ts_utc": stamp,
+                    "io_bytes": io_out,
+                    "stage_id": "stage1",
+                    "status": "success" if ok else "failed",
+                },
+            ]
+
+        make_run("run-a1", "baseline", "aaa1111", action("E-0001", True, 100, 900, 0) + action("E-0002", False, 100, 100, 10))
+        make_run("run-a2", "baseline", "aaa1111", action("E-0003", True, 200, 800, 0))
+        make_run("run-b1", "tuned", "aaa1111", action("E-0004", True, 50, 50, 0))
+        # 아무것도 하지 못한 실행. 집계에서 빠지면 비교가 성공한 실행 쪽으로 치우친다.
+        make_run("run-b2", "tuned", "bbb2222", [])
+
+    def _configs(self) -> dict:
+        runs = self.runstat.collect_runs(self.runs_dir)
+        return {item["config_label"]: item for item in self.runstat.group_by_config(runs)}
+
+    def test_runs_group_by_config_label(self) -> None:
+        configs = self._configs()
+        self.assertEqual(configs["baseline"]["runs"], 2)
+        self.assertEqual(configs["tuned"]["runs"], 2)
+
+    def test_empty_run_is_counted_not_dropped(self) -> None:
+        configs = self._configs()
+        self.assertEqual(configs["tuned"]["empty_runs"], 1)
+        self.assertEqual(configs["tuned"]["actions_mean"], 0.5)
+
+    def test_success_rate_is_pooled_over_attempts(self) -> None:
+        # baseline은 3번 시도해 2번 성공했다. 실행별 성공률(50%, 100%)의 평균인
+        # 75%가 아니라 66.7%여야 짧은 실행이 과대 대표되지 않는다.
+        configs = self._configs()
+        self.assertAlmostEqual(configs["baseline"]["success_rate"], 0.667, places=3)
+
+    def test_io_bytes_are_summed_per_run(self) -> None:
+        runs = {run["run_id"]: run for run in self.runstat.collect_runs(self.runs_dir)}
+        self.assertEqual(runs["run-a1"]["io_in"], 200)
+        self.assertEqual(runs["run-a1"]["io_out"], 1000)
+        self.assertEqual(runs["run-a1"]["io_total"], 1200)
+
+    def test_mixed_harness_revs_are_surfaced(self) -> None:
+        configs = self._configs()
+        self.assertEqual(configs["tuned"]["harness_revs"], ["aaa1111", "bbb2222"])
+        report = self.runstat.format_report(
+            self.runstat.collect_runs(self.runs_dir), list(configs.values()), per_run=True
+        )
+        self.assertIn("하네스 코드가 섞였다", report)
+
+    def test_truncated_last_line_does_not_drop_the_run(self) -> None:
+        events = self.runs_dir / "run-a2" / "engagement" / "EVENTS.jsonl"
+        original = events.read_text(encoding="utf-8")
+        events.write_text(original + '{"event_id": "E-9999", "pha', encoding="utf-8")
+        try:
+            runs = {run["run_id"]: run for run in self.runstat.collect_runs(self.runs_dir)}
+            self.assertEqual(runs["run-a2"]["actions"], 1)
+        finally:
+            events.write_text(original, encoding="utf-8")
 
 
 class StageLabelling(unittest.TestCase):

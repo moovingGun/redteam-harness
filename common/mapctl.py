@@ -9,9 +9,9 @@ from typing import Any, Dict
 
 from engine import (
     DECISIONS_PATH,
-    EVENTS_PATH,
     allocate_branch,
     allocate_clue,
+    append_event,
     append_jsonl,
     bootstrap,
     decide_target,
@@ -55,8 +55,10 @@ def append_classification(
         "clue_ids": clue_ids,
         "map_changed": True,
         "phase": "classification",
+        # 분류는 하네스 안에서만 일어난다. 외부로 오간 바이트가 없으므로 0이다.
+        "io_bytes": 0,
     }
-    append_jsonl(EVENTS_PATH, value)
+    append_event(value)
     append_jsonl(DECISIONS_PATH, value)
 
 

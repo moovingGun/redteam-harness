@@ -1,17 +1,11 @@
 .DS_Store
 
-# 실행 중 자동 생성되는 전체 문제 기록
-engagement/MAP.md
-engagement/LEDGER.md
-engagement/EVENTS.jsonl
-engagement/DECISIONS.jsonl
-engagement/runtime/*
-!engagement/runtime/.gitkeep
-engagement/evidence/*
-!engagement/evidence/.gitkeep
-
-# Stage 작업 파일은 실행 산출물이므로 저장소에 넣지 않는다
-engagement/work/
+# 실행 기록은 실행마다 runs/<run_id>/engagement 아래로 격리된다.
+# MAP·LEDGER·EVENTS·증적·Stage 작업 파일·실행별 settings.json이 전부 그 안에 있고,
+# 모두 실행 산출물이다. 클린룸 원칙상 다음 실행이 이전 실행의 답을 미리 알면 안 되므로
+# 저장소에는 넣지 않는다.
+runs/*
+!runs/.gitkeep
 
 # Python 임시 파일과 로컬 로그
 __pycache__/
