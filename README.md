@@ -6,6 +6,13 @@
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![Dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-green)
 
+> [!NOTE]
+> **계보**: 이 저장소는 단독 작성한 원본이다. best-first 탐색과 E/C/B 증적 추적의 최소 구현이며
+> macOS 전용이다. 여기에 크로스플랫폼 지원(Windows·Linux)과 실패 4분류를 통합한 버전은
+> [pentest-harness](https://github.com/moovingGun/pentest-harness)에 있다.
+> 이 저장소는 계속 유지된다 — 통합본에 아직 옮기지 않은 구성 요소(실행 이어받기 `carryover.py`,
+> 원본 시스템 프롬프트)가 여기에만 있다.
+
 > [!WARNING]
 > **승인된 격리 모의침투 환경에서만 사용한다.**
 > 이 저장소는 공격 행위를 수행하는 AI 에이전트를 구동하는 하네스다. 서면 승인 없이 타인의
