@@ -42,6 +42,11 @@ if [ -n "${REDTEAM_RESUME:-}" ]; then
     print -u2 "실행 폴더는 있는데 상태 파일이 없다: $RESUME_DIR/engagement/runtime/STATE.json"
     exit 1
   fi
+  # 이어받을 내용이 실제로 뽑히는지 새 실행 폴더를 만들기 전에 확인한다. 폴더를
+  # 만든 뒤에 실패하면 시작도 못 한 실행이 runs/ 아래 남는데, runstat은 폴더
+  # 하나를 실행 하나로 세므로 그게 "이 구성으로 아무것도 하지 못한 실행"으로
+  # 집계된다. 구성 비교가 그만큼 조용히 기운다.
+  /usr/bin/python3 "$COMMON_DIR/carryover.py" "$RESUME_DIR" --json >/dev/null
 fi
 
 RUN_ID=${REDTEAM_RUN_ID:-"$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%04x' $RANDOM)"}
@@ -88,6 +93,14 @@ export REDTEAM_HARNESS_REV="$HARNESS_REV"
 # 훅 배선을 이 실행 폴더에 절대 경로로 굳힌다. 상대 경로 배선은 실행 폴더
 # 깊이가 바뀌는 순간 조용히 끊기고, 훅이 하나도 로드되지 않은 채로 진행된다.
 /usr/bin/python3 "$COMMON_DIR/hook.py" prepare-run "$RUN_DIR" </dev/null >/dev/null
+
+# 이어받기는 prepare-run 뒤여야 한다. prepare_run이 RUN.json을 새로 쓰므로 먼저
+# 심으면 resumed 표시가 그 자리에서 지워지고, 이어받은 실행이 아무것도 모르고
+# 출발한 실행과 같은 줄에서 평균된다.
+if [ -n "$RESUME_DIR" ]; then
+  /usr/bin/python3 "$COMMON_DIR/hook.py" resume "$RESUME_DIR" </dev/null >/dev/null
+  print "이어받음: $RESUME_DIR"
+fi
 
 # .mcp.json은 저장소 루트에 있는데 claude는 실행 폴더에서 뜬다. 그 자리에서는
 # 자동 발견되지 않으므로 절대 경로로 직접 넘긴다. settings.json과 같은 이유다.

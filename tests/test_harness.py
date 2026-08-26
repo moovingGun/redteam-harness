@@ -28,6 +28,7 @@ os.environ["REDTEAM_RUN_DIR"] = _TEMP.name
 os.environ["REDTEAM_SCOPE_ENFORCE"] = "1"
 sys.path.insert(0, str(COMMON))
 
+import carryover  # noqa: E402
 import engine  # noqa: E402
 import hook  # noqa: E402
 
@@ -930,6 +931,125 @@ class StageLabelling(unittest.TestCase):
             "T-02": {"value": "b", "status": "approved", "stage": "stage2"},
         }
         self.assertEqual(engine.next_stage_label(state), "stage3")
+
+
+class CarryoverWiring(unittest.TestCase):
+    """이어받기 배선. 검증만 하고 실제로 심지 않으면 조용히 빈 실행이 된다.
+
+    실제로 그렇게 나갔던 적이 있다. 런처가 REDTEAM_RESUME을 받아 부모 폴더와
+    STATE.json 존재까지 확인해 놓고 hook.py resume을 부르지 않아서, 이어받기를
+    요청한 실행이 아무것도 모르는 채로 출발했다. 에러도 나지 않았다.
+    """
+
+    def _launcher(self) -> str:
+        return (ROOT / "start-redteam.command").read_text(encoding="utf-8")
+
+    def test_launcher_actually_calls_resume(self) -> None:
+        self.assertIn('hook.py" resume "$RESUME_DIR"', self._launcher())
+
+    def test_resume_runs_after_prepare_run(self) -> None:
+        """prepare_run이 RUN.json을 새로 쓰므로 이어받기가 먼저면 표시가 지워진다.
+
+        resumed 표시가 사라지면 아는 상태에서 출발한 실행이 아무것도 모르고
+        출발한 실행과 같은 줄에서 평균된다. 구성 비교가 그만큼 기운다.
+        """
+        text = self._launcher()
+        self.assertLess(
+            text.index('prepare-run "$RUN_DIR"'),
+            text.index('resume "$RESUME_DIR"'),
+            "이어받기가 prepare-run보다 먼저다. RUN.json의 resumed 표시가 덮어써진다",
+        )
+
+    def test_carryover_is_validated_before_the_run_folder_exists(self) -> None:
+        """이어받을 게 없으면 실행 폴더를 만들기 전에 멈춰야 한다.
+
+        runstat은 runs/ 아래 폴더 하나를 실행 하나로 센다. 시작도 못 하고 죽은
+        실행이 남으면 "이 구성으로 아무것도 하지 못했다"는 데이터가 하나 생긴다.
+        """
+        text = self._launcher()
+        self.assertIn('carryover.py" "$RESUME_DIR" --json', text)
+        self.assertLess(
+            text.index('carryover.py" "$RESUME_DIR"'),
+            text.index('RUN_DIR="$ROOT_DIR/runs/$RUN_ID"'),
+            "이어받기 검증이 실행 폴더 경로 확정보다 늦다",
+        )
+
+    def test_launcher_stops_when_parent_has_no_target(self) -> None:
+        parent = Path(_TEMP.name) / "carryover-no-target" / "engagement"
+        (parent / "runtime").mkdir(parents=True, exist_ok=True)
+        (parent / "runtime" / "STATE.json").write_text(
+            json.dumps({"schema": 4, "target": "미설정"}), encoding="utf-8"
+        )
+        proc = subprocess.run(
+            [str(ROOT / "start-redteam.command")],
+            env=dict(os.environ, REDTEAM_RESUME=str(parent.parent)),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("이어받기 실패", proc.stderr)
+
+
+class CarryoverContract(unittest.TestCase):
+    """무엇을 넘기고 무엇을 버리는지. 이 경계가 이어받기의 존재 이유다."""
+
+    def _parent(self) -> Path:
+        engagement = Path(_TEMP.name) / "carryover-parent" / "engagement"
+        (engagement / "runtime").mkdir(parents=True, exist_ok=True)
+        (engagement / "runtime" / "STATE.json").write_text(
+            json.dumps(
+                {
+                    "schema": 4,
+                    "target": "192.0.2.10",
+                    "scope": "192.0.2.0/24",
+                    "current_stage": "stage2",
+                    "targets": {
+                        "T-01": {"value": "192.0.2.10", "status": "approved", "stage": "stage1"},
+                        "T-02": {"value": "192.0.2.99", "status": "pending", "stage": ""},
+                    },
+                    "next_event": 42,
+                    "next_clue": 7,
+                    "clues": [
+                        {"id": "C-01", "existence": "confirmed", "text": "8080 열림"},
+                        {"id": "C-02", "existence": "inferred", "text": "WAF 있을 듯"},
+                    ],
+                    "observations": [{"text": "미분류"}],
+                    "pending": {"P-01": {"text": "대기"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return engagement
+
+    def test_only_confirmed_state_crosses_the_run_boundary(self) -> None:
+        carry = carryover.build(self._parent())
+        seeded = carryover.seed_state(carry, engine.default_state())
+
+        self.assertEqual(seeded["target"], "192.0.2.10")
+        self.assertEqual(list(seeded["targets"]), ["T-01"])
+        self.assertEqual([clue["id"] for clue in seeded["clues"]], ["C-01"])
+        # 승인 대기 대상을 승인된 것처럼 넘기면 범위 차단이 무의미해진다.
+        self.assertEqual(seeded["pending"], {})
+        self.assertEqual(seeded["observations"], [])
+
+    def test_counters_continue_so_event_ids_stay_unique(self) -> None:
+        # 1로 되돌리면 자식의 E-0001이 부모의 E-0001과 충돌하고, 브랜치의
+        # recent_event 참조가 조용히 엉뚱한 이벤트를 가리킨다.
+        carry = carryover.build(self._parent())
+        seeded = carryover.seed_state(carry, engine.default_state())
+        self.assertEqual(seeded["next_event"], 42)
+        self.assertEqual(seeded["next_clue"], 7)
+
+    def test_parent_without_target_is_refused(self) -> None:
+        engagement = Path(_TEMP.name) / "carryover-empty" / "engagement"
+        (engagement / "runtime").mkdir(parents=True, exist_ok=True)
+        (engagement / "runtime" / "STATE.json").write_text(
+            json.dumps({"schema": 4, "target": "미설정"}), encoding="utf-8"
+        )
+        with self.assertRaises(carryover.CarryoverError):
+            carryover.build(engagement)
 
 
 if __name__ == "__main__":
