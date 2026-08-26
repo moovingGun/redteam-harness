@@ -35,6 +35,7 @@ fi
 RUN_DIR="$ROOT_DIR/runs/$RUN_ID"
 ENGAGEMENT_DIR="$RUN_DIR/engagement"
 SETTINGS_FILE="$RUN_DIR/settings.json"
+MCP_CONFIG="$ROOT_DIR/.mcp.json"
 VIEWER_LOG="$ENGAGEMENT_DIR/runtime/viewer.log"
 VIEWER_PORT=${REDTEAM_PORT:-8765}
 
@@ -56,6 +57,19 @@ export REDTEAM_HARNESS_REV="$HARNESS_REV"
 # 훅 배선을 이 실행 폴더에 절대 경로로 굳힌다. 상대 경로 배선은 실행 폴더
 # 깊이가 바뀌는 순간 조용히 끊기고, 훅이 하나도 로드되지 않은 채로 진행된다.
 /usr/bin/python3 "$COMMON_DIR/hook.py" prepare-run "$RUN_DIR" </dev/null >/dev/null
+
+# .mcp.json은 저장소 루트에 있는데 claude는 실행 폴더에서 뜬다. 그 자리에서는
+# 자동 발견되지 않으므로 절대 경로로 직접 넘긴다. settings.json과 같은 이유다.
+#
+# --strict-mcp-config로 사용자 전역 MCP 서버를 배제한다. 어떤 도구가 붙어 있었는지
+# 모르는 실행은 harness_rev가 같아도 사실은 다른 구성이고, 그러면 구성 비교가
+# 조용히 거짓말을 한다. Burp 말고 다른 MCP를 함께 쓰려면 .mcp.json에 추가한다.
+MCP_ARGS=()
+if [ -f "$MCP_CONFIG" ]; then
+  MCP_ARGS=(--mcp-config "$MCP_CONFIG" --strict-mcp-config)
+else
+  print "MCP 구성 없음 ($MCP_CONFIG). MCP 도구 없이 진행한다."
+fi
 
 print "실행 ID: $RUN_ID | 구성: $CONFIG_LABEL | 하네스: $HARNESS_REV"
 print "기록 폴더: $ENGAGEMENT_DIR"
@@ -83,5 +97,6 @@ done
 
 claude \
   --settings "$SETTINGS_FILE" \
+  "${MCP_ARGS[@]}" \
   --append-system-prompt-file "$COMMON_DIR/redteam-map-prompt.md" \
   --name "redteam-harness"

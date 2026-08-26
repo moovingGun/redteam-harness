@@ -153,6 +153,8 @@ Claude가 근거와 함께 승인 요청 → 대시보드 "대상 범위 승인"
 > 보고 판단하므로 셸 변수(`curl http://$T/`), 파일 경유(`$(cat ip.txt)`), 옥텟 루프
 > (`203.0.113.$i`), 호스트명은 통과한다. 범위 통제의 최종 책임은 프롬프트 §0의 안전
 > 규칙과 사용자 승인에 있고, 이 훅은 그 위에 얹는 두 번째 방어선이다.
+> **Burp MCP를 붙이면 이 구멍이 넓어진다.** 아래 [Burp MCP 연동](#burp-mcp-연동)의
+> 한계 표를 반드시 먼저 읽어라.
 
 터미널에서 직접 다룰 수도 있다.
 
@@ -173,6 +175,82 @@ python3 common/mapctl.py target-reject  --id T-03 --reason "범위 밖"
 | 작업 폴더 | `work/stageN/`이 만들어진다 (실행 폴더 안) |
 | 차단 해제 | 그 IP로의 행동이 허용된다 |
 | 기록 | E/C/B 번호와 MAP·LEDGER는 끊기지 않고 이어진다 |
+
+## Burp MCP 연동
+
+저장소 루트의 `.mcp.json`이 Burp Suite의 MCP 서버를 SSE로 `127.0.0.1:9876`에 연결한다.
+런처가 이 파일을 절대 경로로 넘기므로, 실행 폴더가 `runs/<run_id>/engagement`로 깊어져도
+배선이 끊기지 않는다.
+
+```json
+{
+  "mcpServers": {
+    "burp": { "type": "sse", "url": "http://127.0.0.1:9876/sse" }
+  }
+}
+```
+
+### 설치 절차
+
+1. **Burp에 MCP 확장을 설치한다.** Burp Suite → `Extensions` → `BApp Store` → "MCP Server" 설치.
+2. **MCP 서버를 켜고 포트를 확인한다.** 확장 탭(또는 `Settings`)에서 서버를 활성화하고 포트가
+   `9876`인지 본다. 메뉴 위치는 Burp 버전마다 다르다. 포트를 바꿨다면 `.mcp.json`의 `url`도 같이 바꾼다.
+3. **`.mcp.json`을 커밋한다.** 이게 `harness_rev`에 MCP 구성이 반영되는 유일한 경로다(아래 참고).
+4. **하네스를 띄운다.** `./start-redteam.command`
+5. **연결을 확인한다.** 열린 Claude에서 `/mcp`를 치면 `burp` 서버와 도구 목록이 보인다.
+   안 보이면 Burp의 MCP 서버가 꺼져 있거나 포트가 다른 것이다.
+
+Burp가 안 떠 있어도 하네스는 그대로 실행된다. `.mcp.json` 자체가 없으면 MCP 없이 진행한다는 안내만 출력한다.
+
+### 구성 추적
+
+`harness_rev`는 `git rev-parse` + `git status --porcelain`으로 만들어진다. 따라서 `.mcp.json`이
+Git에 추적되고 있으면 **MCP 구성을 바꾸는 순간 자동으로 rev가 달라진다.**
+
+| `.mcp.json` 상태 | `harness_rev` |
+|---|---|
+| 변경 없음 | `153dcac` |
+| 수정했으나 미커밋 | `153dcac-dirty` |
+| 수정을 커밋 | `2347a60` (새 해시) |
+
+별도의 추적 파일 목록을 두지 않는 이유가 이것이다. 테스트
+`McpWiring.test_mcp_config_is_tracked_so_it_moves_harness_rev`가 `.mcp.json`이 Git에서
+빠지는 것을 막아, 이 보장이 조용히 사라지지 않게 한다.
+
+런처는 `--strict-mcp-config`로 실행한다. 사용자 전역 MCP 서버가 섞이면 어떤 도구가 붙어 있었는지
+모르는 실행이 되고, 그러면 `harness_rev`가 같아도 사실은 다른 구성이라 비교가 조용히 거짓말을 한다.
+Burp 외에 다른 MCP를 함께 쓰려면 전역 설정이 아니라 `.mcp.json`에 추가한다.
+
+### 범위 차단이 Burp에 대해 보장하는 것과 못 하는 것
+
+`mcp__` 도구는 `requires_classification`이 잡으므로 범위 검사 게이트를 통과한다. 그러나 훅은
+**tool_input 문자열만** 보고 판단한다. 대상 IP가 그 문자열에 드러나야만 차단된다. 아래는 실제로
+훅을 호출해 측정한 결과다(승인 범위 = `192.0.2.10` 하나).
+
+| Burp 도구 호출 | 훅 판정 |
+|---|---|
+| `send_http1_request(targetHostname="203.0.113.55")` | **차단** |
+| raw 요청의 `Host:` 헤더에 미승인 IP | **차단** |
+| `send_http1_request(targetHostname="192.0.2.10")` | 허용(정상) |
+| `send_http1_request(targetHostname="internal.example.com")` | **통과** |
+| `get_proxy_http_history(count=50)` | **통과** |
+
+아래 두 줄이 Bash에는 없던, Burp를 붙이면서 새로 생기는 구멍이다.
+
+- **호스트명은 검사하지 않는다.** 원래는 CVE 조사 같은 웹 검색을 막지 않으려는 의도적 선택이었다.
+  Bash에서는 큰 문제가 아니었지만, Burp는 호스트명만으로 실제 공격 트래픽을 보낼 수 있다.
+- **대상이 tool_input에 없는 도구가 많다.** Burp는 프록시 히스토리·Repeater 탭처럼 이미 자기가
+  들고 있는 대상을 참조해 동작한다. 그때 명령 문자열에는 IP가 없고, 훅은 판단할 근거가 없어 통과시킨다.
+  Bash로 `curl`을 칠 때는 대상이 명령에 반드시 나타나므로 없던 문제다.
+
+> **Burp는 하네스의 승인 범위를 모른다.** 훅은 Claude가 Burp에게 무엇을 시키는지만 보고,
+> Burp가 실제로 어디로 패킷을 보내는지는 보지 못한다. 그러므로 **Burp Suite의 Target Scope를
+> 하네스 승인 범위와 직접 일치시켜라.** 훅은 두 번째 방어선일 뿐이고, Burp 연동에서는 Burp 자신의
+> 스코프 설정이 첫 번째 방어선이다. 이 두 가지를 맞추는 것은 자동화되지 않으며 사용자 책임이다.
+
+이 동작은 `tests/test_harness.py`의 `BurpMcpScope`가 차단되는 경우와 통과하는 경우를 모두
+고정하고 있다. 통과 케이스를 테스트로 남긴 것은 그게 옳아서가 아니라, 이 하네스가 무엇을
+보장하지 않는지 코드로 드러내기 위해서다.
 
 ## 구성별 비교
 
@@ -216,6 +294,7 @@ tuned     2     1      0.5 (0.5)  0.5    1       100%  2.5K (2.5K)  0.1s
 
 - `start-redteam.command`: 유일한 실행기. 문제 하나를 처음부터 끝까지 이것으로 진행한다.
 - `common/`: 재사용 코드, Hook 설정, 중립 프롬프트, 뷰어, 집계기. 특정 대상의 답·단서·증적을 넣지 않는다.
+- `.mcp.json`: MCP 서버 구성(Burp). Git에 추적되므로 여기를 바꾸면 `harness_rev`가 달라진다.
 - `runs/<run_id>/`: 실행 하나가 통째로 들어가는 폴더. Git에서 제외된다.
 - `tests/`: 승인 흐름과 범위 차단 검증.
 

@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -775,6 +776,129 @@ class RunStatAggregation(unittest.TestCase):
             self.assertEqual(runs["run-a2"]["actions"], 1)
         finally:
             events.write_text(original, encoding="utf-8")
+
+
+class BurpMcpScope(unittest.TestCase):
+    """Burp MCP 도구도 Bash와 같은 범위 차단을 받는다.
+
+    `mcp__` 접두사는 requires_classification이 이미 잡으므로 게이트 자체는 열려
+    있다. 그러나 실제로 차단되느냐는 대상 IP가 tool_input에 문자열로 드러나느냐에
+    달려 있고, Burp 도구는 드러나지 않는 경우가 많다. 걸리는 경우와 걸리지 않는
+    경우를 함께 고정해서, 이 훅이 Burp에 대해 무엇을 보장하고 무엇을 보장하지
+    못하는지 코드로 남긴다.
+    """
+
+    def setUp(self) -> None:
+        with engine.locked_state() as state:
+            state.update(engine.default_state())
+        with engine.locked_state() as state:
+            engine.register_initial_target(state, "192.0.2.10", "stage1")
+            engine.render_unlocked(state)
+        clear_pending()
+
+    def test_burp_tool_reaches_the_scope_gate(self) -> None:
+        # 이게 False가 되면 아래 차단 테스트가 전부 무의미해진다.
+        self.assertTrue(
+            hook.requires_classification({"tool_name": "mcp__burp__send_http1_request"})
+        )
+
+    def test_unapproved_ip_in_burp_target_is_denied(self) -> None:
+        result = pre(
+            "mcp__burp__send_http1_request",
+            {"targetHostname": "203.0.113.55", "targetPort": 443, "usesHttps": True},
+        )
+        self.assertEqual(decision_of(result), "deny")
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("203.0.113.55", reason)
+        self.assertIn("target-propose", reason)
+
+    def test_unapproved_ip_inside_raw_request_is_denied(self) -> None:
+        # Burp는 raw HTTP를 통째로 받는다. Host 헤더에 숨어도 잡혀야 한다.
+        clear_pending()
+        result = pre(
+            "mcp__burp__send_http1_request",
+            {"content": "GET / HTTP/1.1\r\nHost: 203.0.113.55\r\n\r\n"},
+        )
+        self.assertEqual(decision_of(result), "deny")
+
+    def test_approved_ip_is_allowed(self) -> None:
+        clear_pending()
+        self.assertIsNone(
+            decision_of(
+                pre(
+                    "mcp__burp__send_http1_request",
+                    {"targetHostname": "192.0.2.10", "targetPort": 80},
+                )
+            )
+        )
+
+    def test_hostname_target_is_not_blocked(self) -> None:
+        """도메인을 검사하지 않는 기존 설계가 Burp에도 그대로 적용된다.
+
+        Bash에서는 CVE 조사 같은 웹 검색을 막지 않으려는 의도적 선택이었다.
+        그러나 Burp는 호스트명만으로 실제 공격 트래픽을 보낼 수 있어서, 같은
+        선택이 훨씬 넓은 구멍이 된다. 여기를 막고 싶으면 Burp Target Scope를
+        같이 걸어야 한다. 훅만으로는 안 된다.
+        """
+        clear_pending()
+        self.assertIsNone(
+            decision_of(
+                pre(
+                    "mcp__burp__send_http1_request",
+                    {"targetHostname": "internal.example.com", "targetPort": 443},
+                )
+            )
+        )
+
+    def test_burp_internal_reference_is_not_blocked(self) -> None:
+        """대상이 tool_input에 드러나지 않으면 훅은 판단할 근거가 없다.
+
+        Burp는 프록시 히스토리·Repeater 탭처럼 이미 자기가 들고 있는 대상을
+        참조해 동작할 수 있고, 그때 명령 문자열에는 IP가 없다. 훅은 문자열만
+        보므로 통과시킨다. Bash에서는 대상이 명령에 반드시 나타나므로 없던
+        구멍이고, Burp를 붙이면서 새로 생긴다.
+        """
+        clear_pending()
+        self.assertIsNone(decision_of(pre("mcp__burp__get_proxy_http_history", {"count": 50})))
+
+
+class McpWiring(unittest.TestCase):
+    """.mcp.json 배선.
+
+    claude는 runs/<run_id>/engagement에서 뜨는데 .mcp.json은 저장소 루트에 있다.
+    그 자리에서는 자동 발견되지 않으므로 런처가 절대 경로로 넘겨야 한다.
+    settings.json에서 이미 한 번 겪은 것과 같은 종류의 배선이다.
+    """
+
+    def _config(self) -> dict:
+        return json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
+
+    def test_burp_server_is_configured_over_sse(self) -> None:
+        server = self._config()["mcpServers"]["burp"]
+        self.assertEqual(server["type"], "sse")
+        self.assertEqual(server["url"], "http://127.0.0.1:9876/sse")
+
+    def test_launcher_passes_mcp_config_by_absolute_path(self) -> None:
+        text = (ROOT / "start-redteam.command").read_text(encoding="utf-8")
+        self.assertIn('MCP_CONFIG="$ROOT_DIR/.mcp.json"', text)
+        self.assertIn("--mcp-config", text)
+        self.assertIn('"${MCP_ARGS[@]}"', text)
+
+    def test_mcp_config_is_tracked_so_it_moves_harness_rev(self) -> None:
+        """.mcp.json이 Git에 없으면 MCP 구성 변경이 harness_rev에 반영되지 않는다.
+
+        harness_rev는 git rev-parse + git status --porcelain으로 만들어진다.
+        따라서 이 파일이 추적되고 있다는 사실 자체가 "MCP 구성이 바뀌면 rev가
+        달라진다"를 보장한다. 별도의 파일 목록을 두지 않는 근거가 이 테스트다.
+        """
+        proc = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "--error-unmatch", ".mcp.json"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.assertEqual(
+            proc.returncode, 0, ".mcp.json이 Git에 추가되어 있지 않다 (git add .mcp.json)"
+        )
 
 
 class StageLabelling(unittest.TestCase):
