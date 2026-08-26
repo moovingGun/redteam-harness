@@ -37,6 +37,59 @@ else:
 MAPCTL_PATH = Path(__file__).resolve().with_name("mapctl.py")
 
 
+def resume_from(parent: Path) -> Dict[str, Any]:
+    """부모 실행의 확정 상태를 이 실행에 심는다.
+
+    새 실행 폴더에 심는 이유는 실행 경계를 물리적으로 유지하기 위해서다.
+    같은 폴더에 이어 쓰면 run_id 하나 아래에 서로 기억이 끊긴 세션 둘이 들어가고,
+    runstat은 그걸 깨끗한 실행 하나로 집계한다. 그러면 구성 비교가 조용히 거짓말을
+    한다. 이 하네스가 이벤트 단위에서 막는 사후 재구성을 실행 단위에서 허용하는 꼴이다.
+
+    EVENTS.jsonl은 심지 않는다. 새 실행의 이벤트 파일이 비어 있어야 runstat이
+    "이번 실행에서 실제로 한 일"만 센다.
+    """
+    from carryover import CarryoverError, build, render, resolve_engagement, seed_state
+    from engine import ROOT, default_state
+
+    try:
+        engagement = resolve_engagement(parent)
+        carry = build(engagement)
+    except CarryoverError as exc:
+        raise SystemExit("이어받기 실패: {0}".format(exc))
+
+    if str(engagement) == str(ROOT):
+        raise SystemExit("자기 자신을 이어받을 수 없다: {0}".format(ROOT))
+
+    with locked_state() as state:
+        state.update(seed_state(carry, default_state()))
+        render_unlocked(state)
+
+    (ROOT / "CARRYOVER.md").write_text(render(carry), encoding="utf-8")
+
+    # RUN.json에 계보를 남긴다. 이어받은 실행은 아는 상태에서 출발하므로
+    # cold start와 같은 줄에 놓고 평균 내면 안 된다. runstat이 이 표시를 읽는다.
+    manifest_path = ROOT.parent / "RUN.json"
+    manifest: Dict[str, Any] = {}
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except ValueError:
+            manifest = {}
+    manifest.update(
+        {
+            "resumed": True,
+            "parent_run": carry.get("parent_run"),
+            "carried_clues": len(carry.get("clues") or []),
+            "carried_branches": len(carry.get("branches") or {}),
+            "carried_from_event": (carry.get("last_finished") or {}).get("event_id"),
+        }
+    )
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return manifest
+
+
 def read_input() -> Dict[str, Any]:
     try:
         value = json.load(sys.stdin)
@@ -321,6 +374,10 @@ def main() -> None:
         if len(sys.argv) < 3:
             raise SystemExit("prepare-run: 실행 폴더 경로가 필요합니다")
         print(json.dumps(prepare_run(Path(sys.argv[2])), ensure_ascii=False))
+    elif mode == "resume":
+        if len(sys.argv) < 3:
+            raise SystemExit("resume: 부모 실행 폴더 경로가 필요합니다")
+        print(json.dumps(resume_from(Path(sys.argv[2])), ensure_ascii=False))
     elif mode == "post":
         _finish(hook, failed=False)
     elif mode == "failure":

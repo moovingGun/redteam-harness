@@ -21,6 +21,29 @@ if [ -n "${REDTEAM_CONFIG:-}" ]; then
   exit 1
 fi
 
+# 끊긴 실행 이어받기. REDTEAM_RESUME=<run_id>를 주면 그 실행의 확정 상태를
+# 새 실행 폴더에 심고 시작한다. 원본 폴더는 건드리지 않는다.
+#
+# 같은 폴더에 이어 쓰지 않는 이유: run_id 하나 아래에 서로 기억이 끊긴 세션 둘이
+# 들어가면 runstat은 그걸 깨끗한 실행 하나로 집계한다. 앞뒤 harness_rev가 다를
+# 수도 있다. 이벤트 단위에서 사후 재구성을 막아놓고 실행 단위에서 허용하는 꼴이다.
+RESUME_DIR=""
+if [ -n "${REDTEAM_RESUME:-}" ]; then
+  case "$REDTEAM_RESUME" in
+    */*) RESUME_DIR=${REDTEAM_RESUME:A} ;;
+    *)   RESUME_DIR="$ROOT_DIR/runs/$REDTEAM_RESUME" ;;
+  esac
+  if [ ! -d "$RESUME_DIR" ]; then
+    print -u2 "이어받을 실행이 없다: $RESUME_DIR"
+    print -u2 "가능한 실행: $(ls "$ROOT_DIR/runs" 2>/dev/null | tr '\n' ' ')"
+    exit 1
+  fi
+  if [ ! -f "$RESUME_DIR/engagement/runtime/STATE.json" ]; then
+    print -u2 "실행 폴더는 있는데 상태 파일이 없다: $RESUME_DIR/engagement/runtime/STATE.json"
+    exit 1
+  fi
+fi
+
 RUN_ID=${REDTEAM_RUN_ID:-"$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%04x' $RANDOM)"}
 # 실행 ID는 그대로 폴더 이름이 된다. 경로 조각이 섞이면 기록이 runs/ 밖에 생긴다.
 case "$RUN_ID" in

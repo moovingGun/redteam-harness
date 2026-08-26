@@ -14,3 +14,6 @@ __pycache__/
 
 # 세션 인수인계 메모. 대상 IP 등 실행별 정보가 들어가므로 저장소에 넣지 않는다.
 HANDOFF.md
+
+# 로컬 권한 허용 목록. 사람마다 다르고 이 기계에서만 의미가 있다.
+.claude/settings.local.json
