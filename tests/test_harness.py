@@ -514,6 +514,27 @@ class HookWiring(unittest.TestCase):
         self.assertIn('--settings "$SETTINGS_FILE"', text)
         self.assertNotIn('--settings "$COMMON_DIR/settings.json"', text)
 
+    def test_config_typo_stops_the_run(self) -> None:
+        """REDTEAM_CONFIG로 잘못 써도 조용히 default로 돌아가면 안 된다.
+
+        라벨이 틀린 실행은 구성 비교에 쓸 수 없는데, 그 사실은 실행이 다 끝난
+        뒤에야 드러난다. REDTEAM_RUN_ID를 일부러 잘못 준 것은 백스톱이다.
+        오타 가드가 사라져도 런처가 그 다음 검사에서 멈추므로 이 테스트가
+        실제로 claude를 띄우거나 runs/ 폴더를 만들 수 없다. stderr 메시지로
+        둘 중 어느 가드가 걸렸는지 갈라낸다.
+        """
+        env = dict(os.environ, REDTEAM_CONFIG="baseline", REDTEAM_RUN_ID="bad/name")
+        proc = subprocess.run(
+            [str(ROOT / "start-redteam.command")],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("REDTEAM_CONFIG_LABEL", proc.stderr)
+
     def test_launcher_exports_run_identity(self) -> None:
         # 이 세 값이 환경으로 넘어가지 않으면 EVENTS.jsonl이 실행을 식별하지 못한다.
         text = (ROOT / "start-redteam.command").read_text(encoding="utf-8")

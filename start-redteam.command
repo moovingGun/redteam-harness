@@ -13,6 +13,14 @@ set -eu
 ROOT_DIR=${0:A:h}
 COMMON_DIR="$ROOT_DIR/common"
 
+# 라벨 변수 이름은 REDTEAM_CONFIG_LABEL 하나다. REDTEAM_CONFIG로 잘못 쓰면 조용히
+# 무시되고 default로 기록되는데, 그 사실은 실행이 다 끝난 뒤 runstat을 볼 때야
+# 드러난다. 라벨이 틀린 실행은 구성 비교에 못 쓰므로 여기서 즉시 멈춘다.
+if [ -n "${REDTEAM_CONFIG:-}" ]; then
+  print -u2 "REDTEAM_CONFIG는 없는 변수다. REDTEAM_CONFIG_LABEL을 써라: REDTEAM_CONFIG_LABEL=${REDTEAM_CONFIG} $0"
+  exit 1
+fi
+
 RUN_ID=${REDTEAM_RUN_ID:-"$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%04x' $RANDOM)"}
 # 실행 ID는 그대로 폴더 이름이 된다. 경로 조각이 섞이면 기록이 runs/ 밖에 생긴다.
 case "$RUN_ID" in

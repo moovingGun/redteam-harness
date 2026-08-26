@@ -11,3 +11,6 @@ runs/*
 __pycache__/
 *.py[cod]
 *.log
+
+# 세션 인수인계 메모. 대상 IP 등 실행별 정보가 들어가므로 저장소에 넣지 않는다.
+HANDOFF.md
